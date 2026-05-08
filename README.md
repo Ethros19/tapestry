@@ -168,6 +168,14 @@ A launchd plist at `~/Library/LaunchAgents/com.ethros.tapestry.plist` with `RunA
 
 ![Open drawer case showing album art and track list](docs/drawer-case-open.png)
 
+## Working with AI assistants
+
+Want help installing, running, or extending Tapestry via Claude / Cursor / Aider / ChatGPT? Drop [AI-HANDOFF.md](AI-HANDOFF.md) into the agent's context first — it's a single-file primer (architecture, file layout, common tasks, gotchas, code style) that lets an AI start being useful immediately without you having to explain the project.
+
+```
+"Read AI-HANDOFF.md from the Tapestry repo, then help me add an AirPlay backend."
+```
+
 ## License
 
 [MIT](LICENSE).

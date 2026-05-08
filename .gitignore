@@ -23,3 +23,6 @@ skills-lock.json
 
 # Raw CleanShot exports — only the optimized copies in docs/ get committed
 screenshots/
+
+# Local-only scratch (launch post drafts, todo lists, etc.)
+notes/
