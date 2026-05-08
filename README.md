@@ -12,7 +12,7 @@ A vintage cassette deck for [archive.org](https://archive.org) → your network 
 
 The archive.org plugin bundled with Lyrion is a favorites browser, not a search tool. You have to find shows in a separate browser window, add them to your archive.org favorites, and only *then* browse them inside Lyrion. Tapestry skips that loop and stops being Lyrion-only on the way:
 
-1. Type a query (`traffic 1970 fillmore`).
+1. Type a query (`pink floyd 1970`).
 2. Pick a result, hit **▸ Load tape** — or **▤ Grab** to save it for later, or click **▤** on individual tracks to build a mix tape.
 3. Press **PLAY** on the cassette deck.
 4. Audio streams directly from archive.org to whatever you've selected as the player — Lyrion, DLNA, your Mac, etc.
