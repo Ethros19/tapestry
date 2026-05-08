@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#100d09">
+  <meta name="color-scheme" content="dark">
+  <title>Tapestry — a deck for archive.org</title>
+  <link rel="icon" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="14" fill="%23100d09" stroke="%23e09340" stroke-width="2"/><circle cx="16" cy="16" r="3" fill="%23e09340"/></svg>'>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Caveat:wght@400;500;600;700&family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Indie+Flower&family=JetBrains+Mono:wght@400;500;700&family=Kalam:wght@400;700&family=Permanent+Marker&family=Reenie+Beanie&family=Shadows+Into+Light&family=VT323&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar__inner">
+      <div class="topbar__brand">
+        <span class="topbar__hub" aria-hidden="true">
+          <span class="topbar__hub-spoke"></span>
+          <span class="topbar__hub-spoke"></span>
+        </span>
+        <h1 class="topbar__title">Tape<em>stry</em></h1>
+      </div>
+      <div class="topbar__controls">
+        <label class="topbar__field">
+          <span class="topbar__hint">player</span>
+          <select id="player" aria-label="player">
+            <option value="">— scanning —</option>
+          </select>
+        </label>
+        <button id="openDrawer" class="btn btn--search btn--drawer" type="button">
+          <span class="btn--search__icon">▤</span>
+          <span>Drawer</span>
+          <span class="btn__badge" id="drawerCount">0</span>
+        </button>
+        <button id="openSearch" class="btn btn--search" type="button">
+          <span class="btn--search__icon">▸</span>
+          <span>Search archive</span>
+          <kbd class="btn--search__kbd">/</kbd>
+        </button>
+      </div>
+    </div>
+    <div class="topbar__rule" aria-hidden="true"></div>
+  </header>
+
+  <main class="stage">
+
+    <!-- ============== CASSETTE DECK CHASSIS ============== -->
+    <section class="rack" aria-label="cassette deck">
+      <div class="rack__chassis">
+        <span class="rack__bolt rack__bolt--tl" aria-hidden="true"></span>
+        <span class="rack__bolt rack__bolt--tr" aria-hidden="true"></span>
+        <span class="rack__bolt rack__bolt--bl" aria-hidden="true"></span>
+        <span class="rack__bolt rack__bolt--br" aria-hidden="true"></span>
+
+        <div class="rack__top">
+          <span class="rack__model">tapestry&nbsp;·&nbsp;stereo cassette deck&nbsp;·&nbsp;model ts-01</span>
+          <span class="rack__counter" id="counter" aria-hidden="true">
+            <span>0</span><span>0</span><span>0</span><span>0</span>
+          </span>
+        </div>
+
+        <div class="rack__bay">
+          <div class="cassette" id="deck">
+            <div class="cassette__shell">
+              <span class="cassette__screw cassette__screw--tl" aria-hidden="true"></span>
+              <span class="cassette__screw cassette__screw--tr" aria-hidden="true"></span>
+              <span class="cassette__screw cassette__screw--bl" aria-hidden="true"></span>
+              <span class="cassette__screw cassette__screw--br" aria-hidden="true"></span>
+              <span class="cassette__rec" aria-hidden="true" title="REC indicator"></span>
+
+              <!-- printed paper label (3 horizontal sections) -->
+              <div class="cassette__label">
+                <!-- top cream: INDEX -->
+                <div class="cassette__index">
+                  <span class="cassette__index-tag" aria-hidden="true">INDEX</span>
+                  <div class="cassette__index-body">
+                    <span class="cassette__index-creator" id="deckAlbum">no tape loaded</span>
+                    <span class="cassette__index-title" id="deckTrack">— slot empty —</span>
+                  </div>
+                </div>
+
+                <!-- middle orange band with window cutout -->
+                <div class="cassette__band">
+                  <span class="cassette__sideletter" id="deckSide" aria-hidden="true">A</span>
+                  <div class="cassette__window" aria-hidden="true">
+                    <span class="cassette__hub cassette__hub--l">
+                      <span class="cassette__hub-teeth"></span>
+                    </span>
+                    <span class="cassette__tape"></span>
+                    <span class="cassette__hub cassette__hub--r">
+                      <span class="cassette__hub-teeth"></span>
+                    </span>
+                  </div>
+                </div>
+
+                <!-- bottom cream: branding strip -->
+                <div class="cassette__brand-bar" aria-hidden="true">
+                  <span class="cassette__type">TYPE&nbsp;I (NORMAL) POSITION</span>
+                  <span class="cassette__arrow">▸</span>
+                  <span class="cassette__model">TS&nbsp;90</span>
+                </div>
+              </div>
+
+              <!-- transparent plastic mechanism at the bottom -->
+              <div class="cassette__belly" aria-hidden="true"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="rack__plate" aria-hidden="true">
+          <span>three ferrite heads&nbsp;·&nbsp;dolby b/c&nbsp;·&nbsp;auto-stop&nbsp;·&nbsp;tapestry</span>
+        </div>
+
+        <div class="rack__transport" role="group" aria-label="transport">
+          <button class="key key--rec" data-action="rec" disabled aria-label="record" type="button">
+            <span class="key__cap"><span class="key__dot"></span></span>
+            <span class="key__name">rec</span>
+          </button>
+          <button class="key" data-action="prev" disabled aria-label="previous track" type="button">
+            <span class="key__cap">◂◂</span>
+            <span class="key__name">rew</span>
+          </button>
+          <button class="key" data-action="next" disabled aria-label="next track" type="button">
+            <span class="key__cap">▸▸</span>
+            <span class="key__name">ff</span>
+          </button>
+          <button class="key key--play" data-action="play" disabled aria-label="play" type="button">
+            <span class="key__cap">▸</span>
+            <span class="key__name">play</span>
+          </button>
+          <button class="key" data-action="stop" disabled aria-label="stop" type="button">
+            <span class="key__cap">■</span>
+            <span class="key__name">stop</span>
+          </button>
+          <button class="key" data-action="pause" disabled aria-label="pause" type="button">
+            <span class="key__cap">‖</span>
+            <span class="key__name">pause</span>
+          </button>
+          <button class="key key--eject" data-action="eject" disabled aria-label="eject tape" type="button">
+            <span class="key__cap">▲</span>
+            <span class="key__name">eject</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== HANDWRITTEN J-CARD INSERT ============== -->
+    <section class="insert" id="insert" hidden aria-label="cassette tracklist">
+      <div class="insert__paper">
+        <header class="insert__head">
+          <span class="insert__brand">cassette insert</span>
+          <span class="insert__divider" aria-hidden="true">— · —</span>
+          <span class="insert__date" id="insertDate">—</span>
+        </header>
+        <h2 class="insert__title" id="insertTitle">—</h2>
+        <p class="insert__creator" id="insertCreator">—</p>
+
+        <h3 class="insert__side"><span>side&nbsp;A</span></h3>
+        <ol class="insert__tracks" id="insertTracks"></ol>
+
+        <footer class="insert__foot">
+          <span class="insert__id" id="insertId">—</span>
+        </footer>
+      </div>
+    </section>
+
+    <!-- ============== EMPTY STATE ============== -->
+    <section class="welcome" id="welcome">
+      <div class="welcome__stamp">[ DECK · IDLE ]</div>
+      <p class="welcome__title">
+        No tape in the bay.<br>
+        Pull a thread from the archive.
+      </p>
+      <button class="btn btn--solid welcome__cta" id="welcomeSearch" type="button">
+        ▸ Open the archive
+      </button>
+      <p class="welcome__hint">
+        <kbd>/</kbd> search · <kbd>t</kbd> drawer · <kbd>r</kbd> rec · <kbd>e</kbd> eject
+      </p>
+    </section>
+
+  </main>
+
+  <footer class="colophon">
+    <span>tapestry · woven from archive.org</span>
+    <span class="dot" aria-hidden="true">·</span>
+    <span>v1.0</span>
+    <span class="dot" aria-hidden="true">·</span>
+    <span><a href="https://github.com/Ethros19/tapestry" style="color:inherit;text-decoration:none;">github.com/Ethros19/tapestry</a></span>
+  </footer>
+
+  <div id="banner" class="banner" role="status" hidden></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- ============== SEARCH MODAL ============== -->
+  <div class="modal" id="searchModal" hidden role="dialog" aria-modal="true" aria-labelledby="searchModalTitle">
+    <div class="modal__backdrop" id="modalBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ ARCHIVE · SEARCH ]</span>
+          <h2 id="searchModalTitle">Look up a tape</h2>
+        </div>
+        <button id="closeSearch" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+
+      <form id="searchForm" class="modal__form" autocomplete="off">
+        <label class="field field--search">
+          <span class="field__hint">QUERY</span>
+          <input id="q" name="q" type="search" enterkeyhint="search" spellcheck="false"
+                 placeholder="pink floyd 1973 rainbow theatre…">
+        </label>
+        <label class="field field--year">
+          <span class="field__hint">YEAR</span>
+          <input id="year" name="year" type="text" inputmode="numeric" maxlength="4" placeholder="—">
+        </label>
+        <fieldset class="field field--fmt">
+          <span class="field__hint">FORMAT</span>
+          <div class="seg" role="radiogroup">
+            <input type="radio" id="fmt-flac" name="fmt" value="flac" checked>
+            <label for="fmt-flac">FLAC</label>
+            <input type="radio" id="fmt-any" name="fmt" value="any">
+            <label for="fmt-any">ANY</label>
+          </div>
+        </fieldset>
+        <button class="btn btn--go" type="submit">Search&nbsp;▸</button>
+      </form>
+
+      <div class="modal__body">
+        <div class="empty" id="empty">
+          <div class="empty__stamp">[ EMPTY · INDEX ]</div>
+          <h3 class="empty__title" id="emptyTitle">
+            The catalog is quiet.<br>
+            Type a query above, or pull a card from the suggestions.
+          </h3>
+          <ul class="empty__suggestions" id="suggestions"></ul>
+          <div class="empty__rule" aria-hidden="true">— · — · —</div>
+          <p class="empty__fineprint">search archive.org → hit ▸ to load it on the deck</p>
+        </div>
+
+        <ol class="results" id="results"></ol>
+
+        <div class="loading" id="loading" hidden>
+          <div class="reels" aria-hidden="true">
+            <span class="reel"></span>
+            <span class="tape"></span>
+            <span class="reel reel--lag"></span>
+          </div>
+          <span class="loading__text">SEARCHING · · ·</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== TAPE DRAWER MODAL ============== -->
+  <div class="modal" id="drawerModal" hidden role="dialog" aria-modal="true" aria-labelledby="drawerModalTitle">
+    <div class="modal__backdrop" id="drawerBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel modal__panel--drawer">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ TAPE · DRAWER ]</span>
+          <h2 id="drawerModalTitle">Your tape collection</h2>
+        </div>
+        <button id="closeDrawer" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+      <p class="modal__caption">
+        click a tape to load it on the deck · the × discards it
+      </p>
+      <div class="drawer">
+        <div class="drawer__empty" id="drawerEmpty">
+          <div class="empty__stamp">[ DRAWER · EMPTY ]</div>
+          <p class="welcome__title" style="font-size:20px;">
+            No tapes filed yet.<br>
+            Load a show on the deck and hit <kbd>REC</kbd> to save it for later.
+          </p>
+        </div>
+        <div class="drawer__grid" id="drawerGrid"></div>
+      </div>
+    </div>
+  </div>
+
+  <template id="tapeTemplate">
+    <article class="tape">
+      <button class="tape__delete" type="button" aria-label="discard tape">×</button>
+      <button class="tape__shell" type="button" aria-label="load tape">
+        <span class="tape__band" aria-hidden="true"></span>
+        <span class="tape__paper">
+          <span class="tape__creator"></span>
+          <span class="tape__title"></span>
+          <span class="tape__date"></span>
+          <span class="tape__count"></span>
+        </span>
+        <span class="tape__edge" aria-hidden="true"></span>
+      </button>
+    </article>
+  </template>
+
+  <template id="cardTemplate">
+    <li class="card" tabindex="0">
+      <div class="card__head">
+        <div class="card__index"></div>
+        <div class="card__meta">
+          <h2 class="card__title"></h2>
+          <div class="card__byline">
+            <span class="card__creator"></span>
+            <span class="card__sep" aria-hidden="true">·</span>
+            <span class="card__date"></span>
+            <span class="card__sep" aria-hidden="true">·</span>
+            <span class="card__downloads"></span>
+          </div>
+        </div>
+        <div class="card__actions">
+          <button class="btn btn--ghost card__expand" type="button">Tracks&nbsp;▾</button>
+          <button class="btn btn--solid card__play-show" type="button">▸ Load&nbsp;tape</button>
+        </div>
+      </div>
+      <p class="card__snippet"></p>
+      <div class="card__id"></div>
+      <div class="card__tracks" hidden></div>
+    </li>
+  </template>
+
+  <script src="/static/app.js" type="module"></script>
+</body>
+</html>
