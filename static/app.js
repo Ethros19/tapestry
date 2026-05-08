@@ -110,21 +110,46 @@ const SUGGESTIONS = [
 
 const ARCHIVE_DL_RE = /^https?:\/\/archive\.org\/download\/([^/]+)\//i;
 
+// Player selection: {backend: "lyrion"|"local", id, name} or null.
+// Migrated from the old `lab.player` string (which held a Lyrion MAC).
+function loadStoredPlayer() {
+  try {
+    const raw = localStorage.getItem("tapestry.player.v2");
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  const legacyMac = localStorage.getItem("lab.player");
+  if (legacyMac) return { backend: "lyrion", id: legacyMac, name: "" };
+  return null;
+}
+function storePlayer(p) {
+  if (p) localStorage.setItem("tapestry.player.v2", JSON.stringify(p));
+  else localStorage.removeItem("tapestry.player.v2");
+  localStorage.removeItem("lab.player");
+}
+function playerKey(p) {
+  return p ? `${p.backend}:${p.id}` : "";
+}
+
 const state = {
-  player: localStorage.getItem("lab.player") || "",
+  player: loadStoredPlayer(),     // {backend, id, name} | null
   results: [],
-  items: new Map(),           // identifier → item metadata
-  fetchingItems: new Set(),   // in-flight identifiers
+  items: new Map(),               // identifier → item metadata
+  fetchingItems: new Set(),       // in-flight identifiers
   pollTimer: null,
   lastQuery: null,
   searchOpen: false,
   drawerOpen: false,
-  currentItem: null,          // item currently loaded on the deck
+  currentItem: null,              // item currently loaded on the deck
   currentTrackUrl: null,
   // Playback context for predicting time between status polls (smooth spools)
   spoolCtx: null, // { consumedBefore, total, timeAtPoll, atMs, isPlaying }
   spoolTicker: null,
+  // Mix-tape build state. null until the user adds the first track.
+  // tracks: [{url, title, length, lengthSec, source_id, source_title}, ...]
+  mix: null,
 };
+
+const MIX_MAX_SECONDS = 90 * 60;
 
 // ---------- API ----------
 async function api(path, opts = {}) {
@@ -143,30 +168,177 @@ async function api(path, opts = {}) {
 }
 
 const API = {
-  search: (q, year, fmt) => {
+  search: (q, year, fmt, source, creatorOnly) => {
     const p = new URLSearchParams({ q });
     if (year) p.set("year", year);
     if (fmt)  p.set("fmt", fmt);
+    if (source) p.set("source", source);
+    if (creatorOnly) p.set("creator_only", "true");
     p.set("rows", "40");
     return api(`/api/search?${p}`);
   },
   item: (id) => api(`/api/item/${encodeURIComponent(id)}`),
-  players: () => api(`/api/lyrion/players`),
-  status: (mac) => api(`/api/lyrion/status?player_mac=${encodeURIComponent(mac)}`),
-  play:    (mac, url)  => post("/api/lyrion/play",       { player_mac: mac, url }),
-  add:     (mac, url)  => post("/api/lyrion/add",        { player_mac: mac, url }),
-  insert:  (mac, url)  => post("/api/lyrion/insert",     { player_mac: mac, url }),
-  playShow:(mac, urls) => post("/api/lyrion/play_show",  { player_mac: mac, urls }),
-  loadShow:(mac, urls) => post("/api/lyrion/load_show",  { player_mac: mac, urls }),
-  start:   (mac)       => post("/api/lyrion/start",      { player_mac: mac }),
-  pause:   (mac)       => post("/api/lyrion/pause",      { player_mac: mac }),
-  stop:    (mac)       => post("/api/lyrion/stop",       { player_mac: mac }),
-  eject:   (mac)       => post("/api/lyrion/eject",      { player_mac: mac }),
-  next:    (mac)       => post("/api/lyrion/next",       { player_mac: mac }),
-  prev:    (mac)       => post("/api/lyrion/prev",       { player_mac: mac }),
+  players: () => api(`/api/players`),
+  rescan:  () => post(`/api/players/rescan`, {}),
+  getSettings: () => api(`/api/settings`),
+  saveSettings: (patch) => post(`/api/settings`, patch),
+  discoverLyrion: () => api(`/api/lyrion/discover`),
 };
 function post(path, body) {
   return api(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+// ---------- per-backend drivers ----------
+// Server-side backends (Lyrion, DLNA, future AirPlay/Chromecast) all hit the
+// unified /api/players/{backend}/{id}/{action} surface. The local backend
+// drives an HTML <audio> element directly — the server doesn't see it.
+
+function apiPath(p, action) {
+  return `/api/players/${p.backend}/${encodeURIComponent(p.id)}/${action}`;
+}
+
+const apiDriver = {
+  status:   (p)        => api(apiPath(p, "status")),
+  play:     (p, url)   => post(apiPath(p, "play"),       { url }),
+  add:      (p, url)   => post(apiPath(p, "add"),        { url }),
+  insert:   (p, url)   => post(apiPath(p, "insert"),     { url }),
+  playShow: (p, urls)  => post(apiPath(p, "play_show"),  { urls }),
+  loadShow: (p, urls)  => post(apiPath(p, "load_show"),  { urls }),
+  start:    (p)        => post(apiPath(p, "start"),      {}),
+  pause:    (p)        => post(apiPath(p, "pause"),      {}),
+  stop:     (p)        => post(apiPath(p, "stop"),       {}),
+  next:     (p)        => post(apiPath(p, "next"),       {}),
+  prev:     (p)        => post(apiPath(p, "prev"),       {}),
+  eject:    (p)        => post(apiPath(p, "eject"),      {}),
+  seek:     (p, delta) => post(apiPath(p, "seek_by"),    { delta }),
+};
+
+const localCtx = { queue: [], idx: 0 };
+let localAudio = null;
+function ensureLocalAudio() {
+  if (localAudio) return localAudio;
+  localAudio = $("#localAudio");
+  if (!localAudio) return null;
+  localAudio.addEventListener("ended", () => {
+    if (localCtx.idx + 1 < localCtx.queue.length) localPlayAt(localCtx.idx + 1, true);
+  });
+  // Reflect transport-key state without waiting for the next poll.
+  const reflect = () => {
+    const wasPlaying = !localAudio.paused && !localAudio.ended;
+    updateKeyStates(wasPlaying ? "play" : (localAudio.currentSrc ? "pause" : "stop"));
+    refreshStatus();
+  };
+  ["play", "pause", "ended", "loadedmetadata"].forEach((ev) =>
+    localAudio.addEventListener(ev, reflect),
+  );
+  return localAudio;
+}
+function localPlayAt(i, autoplay) {
+  const a = ensureLocalAudio();
+  if (!a) return;
+  if (i < 0 || i >= localCtx.queue.length) return;
+  localCtx.idx = i;
+  a.src = localCtx.queue[i];
+  if (autoplay) a.play().catch(() => {});
+}
+
+const localDriver = {
+  status: async () => {
+    const a = ensureLocalAudio();
+    const has = !!(a && a.currentSrc);
+    const playing = has && !a.paused && !a.ended;
+    const url = localCtx.queue[localCtx.idx] || "";
+    return {
+      mode: playing ? "play" : (has ? "pause" : "stop"),
+      power: true,
+      volume: a ? Math.round((a.volume || 1) * 100) : 100,
+      time: a ? (a.currentTime || 0) : 0,
+      duration: a ? (a.duration || 0) : 0,
+      playlist_index: has ? localCtx.idx : null,
+      playlist_tracks: localCtx.queue.length,
+      current: has ? { url, title: "", artist: "", album: "", duration: a.duration || 0 } : null,
+    };
+  },
+  play: async (_p, url) => {
+    localCtx.queue = [url];
+    localPlayAt(0, true);
+    return {};
+  },
+  add: async (_p, url) => {
+    localCtx.queue.push(url);
+    if (localCtx.queue.length === 1) localPlayAt(0, true);
+    return {};
+  },
+  insert: async (_p, url) => {
+    localCtx.queue.splice(localCtx.idx + 1, 0, url);
+    return {};
+  },
+  playShow: async (_p, urls) => {
+    localCtx.queue = (urls || []).slice();
+    if (localCtx.queue.length) localPlayAt(0, true);
+    return { queued: localCtx.queue.length };
+  },
+  loadShow: async (_p, urls) => {
+    const a = ensureLocalAudio();
+    localCtx.queue = (urls || []).slice();
+    localCtx.idx = 0;
+    if (a && localCtx.queue.length) {
+      a.src = localCtx.queue[0];   // armed but not playing
+      a.pause();
+    }
+    return { queued: localCtx.queue.length, playing: false };
+  },
+  start: async () => {
+    const a = ensureLocalAudio();
+    if (!a) return {};
+    if (!a.currentSrc && localCtx.queue.length) localPlayAt(localCtx.idx, true);
+    else a.play().catch(() => {});
+    return {};
+  },
+  pause: async () => {
+    const a = ensureLocalAudio();
+    if (!a) return {};
+    if (a.paused) a.play().catch(() => {}); else a.pause();
+    return {};
+  },
+  stop: async () => {
+    const a = ensureLocalAudio();
+    if (a) { a.pause(); a.currentTime = 0; }
+    return {};
+  },
+  next: async () => {
+    const a = ensureLocalAudio();
+    if (localCtx.idx + 1 < localCtx.queue.length) {
+      localPlayAt(localCtx.idx + 1, !!(a && !a.paused));
+    }
+    return {};
+  },
+  prev: async () => {
+    const a = ensureLocalAudio();
+    if (localCtx.idx > 0) localPlayAt(localCtx.idx - 1, !!(a && !a.paused));
+    else if (a) a.currentTime = 0;
+    return {};
+  },
+  eject: async () => {
+    const a = ensureLocalAudio();
+    if (a) { a.pause(); a.removeAttribute("src"); a.load(); }
+    localCtx.queue = [];
+    localCtx.idx = 0;
+    return {};
+  },
+  seek: async (_p, delta) => {
+    const a = ensureLocalAudio();
+    if (!a || !a.currentSrc) return {};
+    const dur = a.duration || 0;
+    const t = Math.max(0, (a.currentTime || 0) + delta);
+    a.currentTime = dur > 0 ? Math.min(t, dur - 0.1) : t;
+    return {};
+  },
+};
+
+const drivers = { lyrion: apiDriver, dlna: apiDriver, local: localDriver };
+function driver() {
+  return drivers[state.player?.backend] || apiDriver;
 }
 
 // ---------- toasts / banner ----------
@@ -196,8 +368,9 @@ function setBanner(msg) {
   bannerActive = true;
 }
 
-function handleLyrionError(e) {
-  if (e.status === 502) {
+function handlePlayerError(e) {
+  const isLyrion = state.player?.backend === "lyrion";
+  if (e.status === 502 && isLyrion) {
     setBanner("Lyrion server unreachable — check that LMS is running, then refresh players.");
     toast("lyrion unreachable", "error");
   } else {
@@ -338,6 +511,9 @@ function tickSpools() {
   let t = ctx.timeAtPoll;
   if (ctx.isPlaying) t += (Date.now() - ctx.atMs) / 1000;
   setSpools((ctx.consumedBefore + t) / ctx.total);
+  // Tick the four-digit counter alongside the spools so it doesn't depend
+  // on the every-three-seconds status poll alone.
+  updateCounter(t);
 }
 
 function startSpoolTicker() {
@@ -354,6 +530,40 @@ function showInsertFor(item, currentUrl) {
 
   // Reset spools to "fresh tape" (full supply / empty takeup) on a new load.
   if (itemChanged) setSpools(0);
+
+  // Per-tape style: deck cassette matches the drawer cassette for the same
+  // item. Start with the deterministic hash-based style; if we can pull a
+  // palette out of the artwork, override with that.
+  if (itemChanged) {
+    const baseStyle = randomTapeStyle(item.identifier);
+    item._style = { ...baseStyle };
+    applyDeckStyle(item._style);
+  }
+
+  // Album artwork as deck backdrop + palette source.
+  const rack = document.querySelector(".rack");
+  if (rack) {
+    const url = item.image_url || "";
+    if (itemChanged) rack.style.removeProperty("--album-art");
+    if (url) {
+      const probe = new Image();
+      probe.decoding = "async";
+      probe.onload = () => {
+        if (state.currentItem === item) {
+          rack.style.setProperty("--album-art", `url("${url}")`);
+        }
+      };
+      probe.src = url;
+
+      if (itemChanged) {
+        extractPaletteFromImage(item.identifier, url).then((extracted) => {
+          if (!extracted || state.currentItem !== item) return;
+          item._style = { ...item._style, ...extracted, font: item._style.font };
+          applyDeckStyle(item._style);
+        });
+      }
+    }
+  }
 
   $("#insert").hidden = false;
   $("#welcome").hidden = true;
@@ -397,6 +607,9 @@ function hideInsert() {
   state.currentTrackUrl = null;
   setTransportEnabled(!!state.player);
   $("#welcome").hidden = false;
+  const rack = document.querySelector(".rack");
+  if (rack) rack.style.removeProperty("--album-art");
+  clearDeckStyle();
 }
 
 function updateInsertHighlight(currentUrl) {
@@ -493,6 +706,178 @@ function randomTapeStyle(identifier) {
   };
 }
 
+// Apply per-tape colors to the playing cassette so the deck and the drawer
+// spine for the same item look like the same tape.
+function applyDeckStyle(style) {
+  const cassette = $("#deck");
+  if (!cassette || !style) return;
+  const band = style.band_color || "#d97e2d";
+  const band2 = style.band_color_2 || band;
+  cassette.style.setProperty("--tape-band", band);
+  cassette.style.setProperty("--tape-band-2", band2);
+  cassette.style.setProperty("--tape-band-hi", lighten(band, 0.12));
+  cassette.style.setProperty("--tape-paper", style.label_color || "#ecdcb8");
+  cassette.style.setProperty("--tape-paper-2", style.label_color_2 || "#e0d0a4");
+  cassette.style.setProperty("--tape-ink", style.ink_color || "#2a2858");
+  cassette.style.setProperty("--tape-font", style.font || '"Caveat", cursive');
+}
+function clearDeckStyle() {
+  const cassette = $("#deck");
+  if (!cassette) return;
+  ["--tape-band", "--tape-band-2", "--tape-band-hi",
+   "--tape-paper", "--tape-paper-2", "--tape-ink", "--tape-font"]
+    .forEach((v) => cassette.style.removeProperty(v));
+}
+
+// ---------- artwork → palette extraction ----------
+// Sample the album artwork on a small canvas, group similar pixels into
+// HSL buckets, and pick the most-saturated cluster as the band color.
+// archive.org doesn't send CORS headers on /services/img, so we route
+// archive.org images through our own /api/artwork/<id> proxy — same
+// origin, canvas reads cleanly. Uploaded /covers/* are already same-origin.
+const _paletteCache = new Map(); // cache key -> style
+
+function paletteFetchUrl(rawUrl) {
+  if (!rawUrl) return "";
+  const m = rawUrl.match(/^https?:\/\/archive\.org\/services\/img\/([^?#]+)/i);
+  if (m) return `/api/artwork/${m[1]}`;
+  return rawUrl;
+}
+
+async function extractPaletteFromImage(identifier, url) {
+  if (_paletteCache.has(identifier)) return _paletteCache.get(identifier);
+  const fetchUrl = paletteFetchUrl(url);
+  const style = await new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    let done = false;
+    const finish = (val) => { if (!done) { done = true; resolve(val); } };
+    img.onload = () => {
+      try {
+        const cv = document.createElement("canvas");
+        const W = 48, H = 48;
+        cv.width = W; cv.height = H;
+        const ctx = cv.getContext("2d");
+        if (!ctx) return finish(null);
+        ctx.drawImage(img, 0, 0, W, H);
+        const data = ctx.getImageData(0, 0, W, H).data;
+        finish(paletteFromPixels(data));
+      } catch {
+        finish(null);
+      }
+    };
+    img.onerror = () => finish(null);
+    setTimeout(() => finish(null), 6000);
+    img.src = fetchUrl;
+  });
+  if (style) _paletteCache.set(identifier, style);
+  return style;
+}
+
+// Bucket pixels by hue and pick the most populous saturated bucket as the
+// band color; derive paper + ink from value/saturation siblings.
+function paletteFromPixels(data) {
+  const buckets = new Array(12).fill(0).map(() => ({ count: 0, r: 0, g: 0, b: 0, s: 0 }));
+  let total = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+    if (a < 200) continue;
+    const [h, s, l] = rgb2hsl(r, g, b);
+    if (l < 0.08 || l > 0.94) continue; // skip near-black/white
+    if (s < 0.18) continue;              // skip washed-out greys
+    const bucket = Math.min(11, Math.floor(h / 30));
+    const b0 = buckets[bucket];
+    b0.count++; b0.r += r; b0.g += g; b0.b += b; b0.s += s;
+    total++;
+  }
+  if (total < 30) return null;
+  buckets.sort((a, b) => b.count - a.count);
+  const top = buckets[0];
+  if (!top.count) return null;
+  const r = Math.round(top.r / top.count);
+  const g = Math.round(top.g / top.count);
+  const b = Math.round(top.b / top.count);
+  const band = rgb2hex(r, g, b);
+  return {
+    band_color: band,
+    band_color_2: darken(band, 0.22),
+    // Warm cream paper, slightly tinted toward the band hue.
+    label_color: tintTowards(band, "#ecdcb8", 0.14),
+    label_color_2: tintTowards(band, "#d8c8a4", 0.14),
+    // Deep complement-ish ink.
+    ink_color: contrastInk(band),
+  };
+}
+
+function rgb2hsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  const l = (mx + mn) / 2;
+  let h = 0, s = 0;
+  if (mx !== mn) {
+    const d = mx - mn;
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    switch (mx) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)); break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4;
+    }
+    h *= 60;
+  }
+  return [h, s, l];
+}
+function rgb2hex(r, g, b) {
+  return "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+function hex2rgb(hex) {
+  const m = hex.replace("#", "");
+  return [parseInt(m.slice(0, 2), 16), parseInt(m.slice(2, 4), 16), parseInt(m.slice(4, 6), 16)];
+}
+function darken(hex, amt) {
+  const [r, g, b] = hex2rgb(hex);
+  return rgb2hex(Math.round(r * (1 - amt)), Math.round(g * (1 - amt)), Math.round(b * (1 - amt)));
+}
+function lighten(hex, amt) {
+  const [r, g, b] = hex2rgb(hex);
+  return rgb2hex(
+    Math.min(255, Math.round(r + (255 - r) * amt)),
+    Math.min(255, Math.round(g + (255 - g) * amt)),
+    Math.min(255, Math.round(b + (255 - b) * amt)),
+  );
+}
+function tintTowards(srcHex, dstHex, srcWeight) {
+  const [r1, g1, b1] = hex2rgb(srcHex);
+  const [r2, g2, b2] = hex2rgb(dstHex);
+  const w = Math.max(0, Math.min(1, srcWeight));
+  return rgb2hex(
+    Math.round(r1 * w + r2 * (1 - w)),
+    Math.round(g1 * w + g2 * (1 - w)),
+    Math.round(b1 * w + b2 * (1 - w)),
+  );
+}
+function contrastInk(bandHex) {
+  const [r, g, b] = hex2rgb(bandHex);
+  const [h] = rgb2hsl(r, g, b);
+  // Pick a saturated dark hue roughly opposite the band.
+  const dh = (h + 180) % 360;
+  return rgb2hex(...hsl2rgb(dh, 0.55, 0.18));
+}
+function hsl2rgb(h, s, l) {
+  h /= 360;
+  if (s === 0) return [l, l, l].map((v) => Math.round(v * 255));
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 1/6) return p + (q - p) * 6 * t;
+    if (t < 1/2) return q;
+    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+    return p;
+  };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [hue2rgb(p, q, h + 1/3), hue2rgb(p, q, h), hue2rgb(p, q, h - 1/3)]
+    .map((v) => Math.round(v * 255));
+}
+
 async function fetchTapes() {
   try {
     const data = await api("/api/drawer");
@@ -511,8 +896,12 @@ function getTapesSync() {
 async function saveTape(item) {
   if (!item || !item.identifier) return false;
   // Preserve previously-assigned style if the user is re-saving.
+  // Otherwise prefer the live deck style (which may include
+  // artwork-extracted colors) over the deterministic hash fallback.
   const prior = drawerCache.get(item.identifier);
-  const style = prior?.band_color ? prior : randomTapeStyle(item.identifier);
+  const style = prior?.band_color
+    ? prior
+    : (item._style || randomTapeStyle(item.identifier));
   const body = {
     identifier: item.identifier,
     title: item.title || "",
@@ -551,6 +940,25 @@ function refreshDrawerCount() {
   if (badge) badge.textContent = String(drawerCache.size);
 }
 
+// ---------- settings modal ----------
+async function openSettings() {
+  $("#settingsModal").hidden = false;
+  document.body.classList.add("modal-open");
+  try {
+    const s = await API.getSettings();
+    $("#settingsLyrionUrl").value = s.lyrion_url || "";
+    const src = s.lyrion_url_source;
+    const note = $("#settingsLyrionSource");
+    if (src === "env") note.textContent = "set via $LYRION_URL env var — saving here won't override it";
+    else if (src === "settings") note.textContent = "from your saved settings";
+    else note.textContent = "default · localhost:9000";
+  } catch {}
+}
+function closeSettings() {
+  $("#settingsModal").hidden = true;
+  if (!state.searchOpen && !state.drawerOpen) document.body.classList.remove("modal-open");
+}
+
 async function openDrawer() {
   if (state.drawerOpen) return;
   state.drawerOpen = true;
@@ -562,6 +970,7 @@ async function openDrawer() {
 function closeDrawer() {
   state.drawerOpen = false;
   $("#drawerModal").hidden = true;
+  if (state.openTapeId) closeTapeCase();
   if (!state.searchOpen) document.body.classList.remove("modal-open");
 }
 
@@ -584,8 +993,24 @@ function applyTapeStyle(el, t) {
   el.style.setProperty("--tape-font",   t.font || '"Caveat", cursive');
 }
 
+function sortTapes(tapes, mode) {
+  const t = tapes.slice();
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+  switch (mode) {
+    case "saved-asc":   t.sort((a, b) => cmp(a.saved_at || 0, b.saved_at || 0)); break;
+    case "title-asc":   t.sort((a, b) => cmp((a.title || "").toLowerCase(), (b.title || "").toLowerCase())); break;
+    case "creator-asc": t.sort((a, b) => cmp((a.creator || "").toLowerCase(), (b.creator || "").toLowerCase())); break;
+    case "date-asc":    t.sort((a, b) => cmp(a.date || "", b.date || "")); break;
+    case "date-desc":   t.sort((a, b) => cmp(b.date || "", a.date || "")); break;
+    case "saved-desc":
+    default:            t.sort((a, b) => cmp(b.saved_at || 0, a.saved_at || 0));
+  }
+  return t;
+}
+
 function renderDrawer() {
-  const tapes = getTapesSync();
+  const sortMode = $("#drawerSort")?.value || "saved-desc";
+  const tapes = sortTapes(getTapesSync(), sortMode);
   const grid = $("#drawerGrid");
   const empty = $("#drawerEmpty");
   grid.innerHTML = "";
@@ -610,7 +1035,7 @@ function renderDrawer() {
       : "";
 
     tpl.querySelector(".tape__shell").addEventListener("click", () =>
-      loadTapeOntoDeck(t.identifier),
+      openTapeCase(t.identifier),
     );
     tpl.querySelector(".tape__delete").addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -621,16 +1046,127 @@ function renderDrawer() {
   }
 }
 
+// Open the tape case in the drawer (the "flip the case open" view): shows
+// the track list with per-track actions (play, queue, mix) plus a single
+// "Load whole tape" action. Replaces the old behavior of clicking a
+// drawer cassette and immediately loading it on the deck.
+async function openTapeCase(identifier) {
+  const drawerEntry = drawerCache.get(identifier);
+  if (!drawerEntry) return;
+
+  // Switch the drawer modal into case-open mode.
+  $("#drawerGrid").hidden = true;
+  $("#drawerEmpty").hidden = true;
+  $("#drawerSort")?.parentElement && ($("#drawerSort").parentElement.style.display = "none");
+  $("#drawerCase").hidden = false;
+  state.openTapeId = identifier;
+
+  // Spine header — match the drawer cassette style for this tape.
+  const spine = $("#caseSpine");
+  applyTapeStyle(spine, drawerEntry);
+  $("#caseCreator").textContent = (drawerEntry.creator || "—").toUpperCase();
+  $("#caseTitle").textContent = drawerEntry.title || identifier;
+  $("#caseDate").textContent = drawerEntry.date ? drawerEntry.date.replace(/-/g, "·") : "";
+
+  // Album / mix-tape cover art. Mix tapes carry their cover URL on the
+  // entry; archive items use archive.org's services/img endpoint.
+  const art = $("#caseArt");
+  const artUrl = drawerEntry.image_url ||
+    (drawerEntry.is_mix
+      ? ""
+      : `https://archive.org/services/img/${encodeURIComponent(drawerEntry.identifier)}`);
+  if (artUrl) {
+    art.classList.remove("is-empty");
+    art.style.backgroundImage = `url("${artUrl}")`;
+  } else {
+    art.classList.add("is-empty");
+    art.style.backgroundImage = "";
+  }
+
+  // Resolve tracks: mix tapes carry them inline; archive items get fetched.
+  const box = $("#caseTracks");
+  let item;
+  if (drawerEntry.is_mix && Array.isArray(drawerEntry.tracks)) {
+    item = {
+      identifier,
+      title: drawerEntry.title || "Mix tape",
+      creator: drawerEntry.creator || "Mix tape",
+      date: drawerEntry.date || "",
+      tracks: drawerEntry.tracks,
+      is_mix: true,
+      image_url: "",
+    };
+    state.items.set(identifier, item);
+  } else {
+    box.innerHTML = `<div class="tracks-loading">FETCHING METADATA · · ·</div>`;
+    try {
+      item = state.items.get(identifier);
+      if (!item) {
+        item = await API.item(identifier);
+        state.items.set(identifier, item);
+      }
+    } catch (e) {
+      box.innerHTML = `<div class="tracks-error">ERROR — ${e.message}</div>`;
+      return;
+    }
+  }
+  $("#caseCount").textContent = `${(item.tracks || []).length} track${(item.tracks || []).length === 1 ? "" : "s"}`;
+  renderTracks(box, item);
+}
+
+function closeTapeCase() {
+  state.openTapeId = null;
+  $("#drawerCase").hidden = true;
+  $("#drawerGrid").hidden = false;
+  const sortBar = $("#drawerSort")?.parentElement;
+  if (sortBar) sortBar.style.display = "";
+  // Re-render in case the user discarded a tape from the case view.
+  renderDrawer();
+}
+
+async function loadCurrentCaseTape() {
+  if (state.openTapeId) {
+    const id = state.openTapeId;
+    closeTapeCase();
+    await loadTapeOntoDeck(id);
+    closeDrawer();
+  }
+}
+
+async function discardCurrentCaseTape() {
+  if (!state.openTapeId) return;
+  if (!window.confirm("Discard this tape?")) return;
+  await deleteTape(state.openTapeId);
+  closeTapeCase();
+}
+
 async function loadTapeOntoDeck(identifier) {
   if (!state.player) { toast("pick a player first", "error"); return; }
   let item = state.items.get(identifier);
   if (!item) {
-    try {
-      item = await API.item(identifier);
+    // Mix tapes are self-contained (their tracks are stored on the drawer
+    // entry itself); skip the archive.org fetch.
+    const drawerEntry = drawerCache.get(identifier);
+    if (drawerEntry?.is_mix && Array.isArray(drawerEntry.tracks)) {
+      item = {
+        identifier,
+        title: drawerEntry.title || "Mix tape",
+        creator: drawerEntry.creator || "Mix tape",
+        date: drawerEntry.date || "",
+        description: "",
+        image_url: "",
+        tracks: drawerEntry.tracks,
+        is_mix: true,
+      };
       state.items.set(identifier, item);
-    } catch (e) {
-      toast(`couldn't load tape · ${e.message}`, "error");
-      return;
+    } else {
+      try {
+        item = await API.item(identifier);
+        state.items.set(identifier, item);
+      } catch (e) {
+        toast(`couldn't load tape · ${e.message}`, "error");
+        return;
+      }
     }
   }
   if (!item.tracks || !item.tracks.length) {
@@ -640,7 +1176,7 @@ async function loadTapeOntoDeck(identifier) {
   try {
     const urls = item.tracks.map((t) => t.url);
     // Load without auto-play — user presses PLAY when ready.
-    await API.loadShow(state.player, urls);
+    await driver().loadShow(state.player, urls);
     Sound.tapeLoad();
     setNowPlaying({
       album: showAlbumLabel(item),
@@ -653,29 +1189,67 @@ async function loadTapeOntoDeck(identifier) {
     toast(`▸ tape loaded · ${urls.length} tracks · press PLAY`);
     setTimeout(refreshStatus, 700);
   } catch (e) {
-    handleLyrionError(e);
+    handlePlayerError(e);
   }
 }
 
-async function recordTape() {
-  if (!state.currentItem) {
-    toast("no tape loaded to record", "error");
+// Save a tape directly from a search row without loading it on the deck.
+// Lazy-fetches item metadata so the drawer entry has a real track count.
+async function grabTape(searchRow, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "▤ saving…"; }
+  try {
+    let item = state.items.get(searchRow.identifier);
+    if (!item) {
+      item = await API.item(searchRow.identifier);
+      state.items.set(searchRow.identifier, item);
+    }
+    const isNew = await saveTape(item);
+    toast(isNew
+      ? `▤ grabbed · ${(item.title || "").slice(0, 50)}`
+      : `▤ already in drawer · ${(item.title || "").slice(0, 50)}`);
+  } catch (e) {
+    toast(`couldn't grab · ${e.message}`, "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = "▤ Grab"; }
+  }
+}
+
+// REC key: dub the currently-playing track onto the mix tape under
+// construction. (Saving the whole tape to the drawer is now the ▤ Grab
+// button on the cassette insert.)
+function recordTape() {
+  if (!state.currentItem || !state.currentTrackUrl) {
+    toast("no track is playing to record", "error");
+    return;
+  }
+  const track = (state.currentItem.tracks || []).find((t) => t.url === state.currentTrackUrl);
+  if (!track) {
+    toast("can't identify current track", "error");
     return;
   }
   // visual REC flash
   const deck = $("#deck");
   deck.classList.add("is-recording");
   setTimeout(() => deck.classList.remove("is-recording"), 900);
-  // brief key press
   const recBtn = document.querySelector('.key[data-action="rec"]');
   if (recBtn) {
     recBtn.classList.add("is-pressed");
     setTimeout(() => recBtn.classList.remove("is-pressed"), 500);
   }
+  addToMix(track, state.currentItem);
+}
+
+// ▤ Grab button on the cassette insert — saves the loaded tape to the
+// drawer (the old REC behavior).
+async function grabCurrentTape() {
+  if (!state.currentItem) {
+    toast("no tape loaded to grab", "error");
+    return;
+  }
   const isNew = await saveTape(state.currentItem);
   toast(isNew
-    ? `● woven into the tapestry · ${(state.currentItem.title || "").slice(0, 50)}`
-    : `● rewoven · ${(state.currentItem.title || "").slice(0, 50)}`);
+    ? `▤ grabbed · ${(state.currentItem.title || "").slice(0, 50)}`
+    : `▤ already in drawer · ${(state.currentItem.title || "").slice(0, 50)}`);
 }
 
 // ---------- suggestions ----------
@@ -719,6 +1293,10 @@ function renderResults() {
     tpl.querySelector(".card__expand").addEventListener("click", (e) => {
       e.stopPropagation();
       toggleCard(card, r.identifier);
+    });
+    tpl.querySelector(".card__grab").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await grabTape(r, e.currentTarget);
     });
     tpl.querySelector(".card__play-show").addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -810,10 +1388,12 @@ function renderTracks(box, item) {
       <button class="track__btn" data-act="play"   title="Play (replace queue)" aria-label="play">▸</button>
       <button class="track__btn" data-act="insert" title="Play next"            aria-label="play next">⤓</button>
       <button class="track__btn" data-act="add"    title="Add to queue"         aria-label="add to queue">＋</button>
+      <button class="track__btn" data-act="mix"    title="Add to mix tape"      aria-label="add to mix">▤</button>
     `;
     actions.querySelector('[data-act="play"]')  .addEventListener("click", () => sendTrack("play",   t, item));
     actions.querySelector('[data-act="insert"]').addEventListener("click", () => sendTrack("insert", t, item));
     actions.querySelector('[data-act="add"]')   .addEventListener("click", () => sendTrack("add",    t, item));
+    actions.querySelector('[data-act="mix"]')   .addEventListener("click", () => addToMix(t, item));
 
     row.appendChild(num);
     row.appendChild(title);
@@ -825,13 +1405,168 @@ function renderTracks(box, item) {
   box.appendChild(wrap);
 }
 
+// ---------- mix tape ----------
+function fmtMMSS(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function mixTotal() {
+  return (state.mix?.tracks || []).reduce((a, t) => a + (t.lengthSec || 0), 0);
+}
+
+function renderMixTray() {
+  const tray = $("#mixTray");
+  if (!tray) return;
+  if (!state.mix || !state.mix.tracks.length) {
+    tray.hidden = true;
+    return;
+  }
+  tray.hidden = false;
+  const total = mixTotal();
+  const full = total >= MIX_MAX_SECONDS - 1;
+  $("#mixCount").textContent = `${state.mix.tracks.length} track${state.mix.tracks.length === 1 ? "" : "s"}`;
+  $("#mixTime").textContent = `${fmtMMSS(total)} / ${fmtMMSS(MIX_MAX_SECONDS)}`;
+  $("#mixProgress").value = Math.min(total, MIX_MAX_SECONDS);
+  tray.classList.toggle("is-full", full);
+}
+
+function addToMix(track, item) {
+  const lenSec = parseLength(track.length || "");
+  if (!state.mix) state.mix = { tracks: [] };
+  const total = mixTotal();
+  if (total + (lenSec || 0) > MIX_MAX_SECONDS) {
+    toast(`tape full · ${fmtMMSS(total)} / ${fmtMMSS(MIX_MAX_SECONDS)}`, "error");
+    return false;
+  }
+  state.mix.tracks.push({
+    url: track.url,
+    title: track.title || track.name,
+    name: track.name,
+    length: track.length || "",
+    lengthSec: lenSec,
+    format: track.format || "",
+    source_id: item?.identifier || "",
+    source_title: item?.title || "",
+    source_creator: item?.creator || "",
+  });
+  renderMixTray();
+  toast(`✚ added · ${(track.title || track.name || "").slice(0, 50)}`);
+  return true;
+}
+
+function openMixSaveModal() {
+  if (!state.mix || !state.mix.tracks.length) return;
+  $("#mixSaveModal").hidden = false;
+  $("#mixSaveName").value = `Mix · ${new Date().toLocaleDateString()}`;
+  $("#mixSaveCover").value = "";
+  $("#mixSavePreview").hidden = true;
+  $("#mixSavePreview").style.backgroundImage = "";
+  $("#mixSaveStatus").textContent = "";
+  document.body.classList.add("modal-open");
+  setTimeout(() => $("#mixSaveName").focus(), 30);
+}
+function closeMixSaveModal() {
+  $("#mixSaveModal").hidden = true;
+  if (!state.searchOpen && !state.drawerOpen) document.body.classList.remove("modal-open");
+}
+
+async function uploadMixCover(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch("/api/mix-cover", { method: "POST", body: fd });
+  if (!r.ok) {
+    let detail = r.statusText;
+    try { detail = (await r.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return (await r.json()).url; // e.g. "/covers/xxx.jpg"
+}
+
+async function saveMixToDrawer({ title, coverUrl } = {}) {
+  if (!state.mix || !state.mix.tracks.length) return;
+  const id = `mix:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const tracks = state.mix.tracks.slice();
+  const totalSec = mixTotal();
+  // Default to deterministic colors; if a cover image was provided,
+  // override with its extracted palette.
+  let style = randomTapeStyle(id);
+  if (coverUrl) {
+    const palette = await extractPaletteFromImage(`mix-cover:${coverUrl}`, coverUrl);
+    if (palette) style = { ...style, ...palette, font: style.font };
+  }
+  const body = {
+    identifier: id,
+    title,
+    creator: "Mix tape",
+    date: new Date().toISOString().slice(0, 10),
+    track_count: tracks.length,
+    band_color: style.band_color,
+    label_color: style.label_color,
+    ink_color: style.ink_color,
+    font: style.font,
+    is_mix: true,
+    tracks,
+    image_url: coverUrl || "",
+  };
+  const r = await post("/api/drawer", body);
+  drawerCache.set(id, r.tape || body);
+  refreshDrawerCount();
+  state.mix = null;
+  renderMixTray();
+  toast(`▸ mix recorded · ${title} · ${fmtMMSS(totalSec)}`);
+}
+
+// ---------- artwork backfill ----------
+// Re-extract colors for every drawer tape from its archive.org artwork
+// (or stored cover image for mix tapes). One-shot — surfaces in Settings.
+async function refreshAllArtworkColors() {
+  await fetchTapes();
+  const tapes = getTapesSync();
+  let updated = 0, skipped = 0;
+  for (const t of tapes) {
+    const url = t.image_url ||
+      (t.is_mix ? "" : `https://archive.org/services/img/${encodeURIComponent(t.identifier)}`);
+    if (!url) { skipped++; continue; }
+    const palette = await extractPaletteFromImage(`refresh:${t.identifier}`, url);
+    if (!palette) { skipped++; continue; }
+    const body = {
+      ...t,
+      band_color: palette.band_color,
+      label_color: palette.label_color,
+      ink_color: palette.ink_color,
+      // Preserve font choice and existing image_url.
+      font: t.font || '"Caveat", cursive',
+      image_url: t.image_url || (t.is_mix ? "" : url),
+    };
+    try {
+      const r = await post("/api/drawer", body);
+      drawerCache.set(t.identifier, r.tape || body);
+      updated++;
+    } catch {
+      skipped++;
+    }
+  }
+  if (state.drawerOpen) renderDrawer();
+  toast(`refreshed ${updated} tape${updated === 1 ? "" : "s"}` + (skipped ? ` · ${skipped} skipped` : ""));
+}
+
+function clearMix() {
+  if (!state.mix || !state.mix.tracks.length) return;
+  if (!window.confirm("Discard this mix tape?")) return;
+  state.mix = null;
+  renderMixTray();
+  toast("◂ mix discarded");
+}
+
 // ---------- play actions ----------
 async function sendTrack(action, t, item) {
   if (!state.player) { toast("pick a player first", "error"); return; }
   try {
-    if (action === "play")        await API.play(state.player, t.url);
-    else if (action === "add")    await API.add(state.player, t.url);
-    else if (action === "insert") await API.insert(state.player, t.url);
+    if (action === "play")        await driver().play(state.player, t.url);
+    else if (action === "add")    await driver().add(state.player, t.url);
+    else if (action === "insert") await driver().insert(state.player, t.url);
     const verb = { play: "▸ playing", add: "＋ queued", insert: "⤓ up next" }[action];
     toast(`${verb} · ${t.title || t.name}`);
     if (action === "play" && item) {
@@ -849,7 +1584,7 @@ async function sendTrack(action, t, item) {
     }
     setTimeout(refreshStatus, 700);
   } catch (e) {
-    handleLyrionError(e);
+    handlePlayerError(e);
   }
 }
 
@@ -865,7 +1600,7 @@ async function playShow(id, btn) {
     const urls = (item.tracks || []).map((t) => t.url);
     if (!urls.length) { toast("nothing playable in this item", "error"); return; }
     // Load the queue but DON'T start playing — user has to press PLAY.
-    await API.loadShow(state.player, urls);
+    await driver().loadShow(state.player, urls);
     Sound.tapeLoad();
     toast(`▸ tape loaded · ${urls.length} tracks · press PLAY`);
     setNowPlaying({
@@ -878,7 +1613,7 @@ async function playShow(id, btn) {
     closeSearch();
     setTimeout(refreshStatus, 700);
   } catch (e) {
-    handleLyrionError(e);
+    handlePlayerError(e);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = "▸ Load tape"; }
   }
@@ -890,14 +1625,16 @@ async function doSearch() {
   if (!q) return;
   const year = $("#year").value.trim();
   const fmt = $('input[name="fmt"]:checked').value;
-  state.lastQuery = { q, year, fmt };
+  const source = ($('input[name="source"]:checked') || {}).value || "live";
+  const creatorOnly = $("#creatorOnly").checked;
+  state.lastQuery = { q, year, fmt, source, creatorOnly };
 
   $("#loading").hidden = false;
   $("#results").innerHTML = "";
   $("#empty").hidden = true;
 
   try {
-    const data = await API.search(q, year, fmt);
+    const data = await API.search(q, year, fmt, source, creatorOnly);
     state.results = data.results || [];
     renderResults();
     if (!state.results.length) {
@@ -916,38 +1653,98 @@ async function doSearch() {
 async function loadPlayers() {
   const sel = $("#player");
   try {
-    const { players } = await API.players();
+    const { players, errors } = await API.players();
+    state.playerList = players || [];
     sel.innerHTML = "";
     if (!players.length) {
       sel.innerHTML = `<option value="">(no players)</option>`;
       setTransportEnabled(false);
       return;
     }
+    // Label format: "name · backend [· off]". The backend tag is essential
+    // when the same physical device exposes itself through multiple
+    // protocols (e.g. ultraRendu can appear as both Lyrion/Squeezelite and
+    // DLNA at the same time depending on what's registered).
+    const backendLabel = { lyrion: "lyrion", local: "this mac", dlna: "dlna", airplay: "airplay" };
     sel.innerHTML =
       `<option value="">— select —</option>` +
       players
-        .map((p) => `<option value="${p.mac}">${escapeHTML(p.name)}${p.power ? "" : " · off"}</option>`)
+        .map((p) => {
+          const key = `${p.backend}:${p.id}`;
+          const tag = backendLabel[p.backend] || p.backend;
+          const off = p.power === false ? " · off" : "";
+          return `<option value="${key}">${escapeHTML(p.name)} · ${tag}${off}</option>`;
+        })
         .join("");
 
-    const stored = state.player && players.some((p) => p.mac === state.player);
+    const stored = state.player &&
+      players.find((p) => p.backend === state.player.backend && p.id === state.player.id);
     if (stored) {
-      sel.value = state.player;
+      sel.value = playerKey(stored);
+      state.player = { backend: stored.backend, id: stored.id, name: stored.name };
     } else if (players.length === 1) {
-      sel.value = players[0].mac;
-      state.player = players[0].mac;
-      localStorage.setItem("lab.player", state.player);
+      const only = players[0];
+      sel.value = playerKey(only);
+      state.player = { backend: only.backend, id: only.id, name: only.name };
+      storePlayer(state.player);
     }
     setTransportEnabled(!!state.player);
-    setBanner("");
-  } catch (e) {
-    if (e.status === 502) {
-      setBanner("Lyrion server unreachable — check that LMS is running, then refresh players.");
-      sel.innerHTML = `<option value="">— offline —</option>`;
+    // Surface a Lyrion outage even when the local player is still available.
+    if (errors && errors.lyrion) {
+      setBanner("Lyrion server unreachable — check that LMS is running, or pick another player.");
     } else {
-      sel.innerHTML = `<option value="">— error —</option>`;
+      setBanner("");
     }
+  } catch (e) {
+    sel.innerHTML = `<option value="">— error —</option>`;
     setTransportEnabled(false);
   }
+}
+
+// When the user switches player, treat it like ejecting the tape from one
+// deck and dropping it into another: the old player stops + clears, the new
+// player loads the same tape paused at track 1, ready for PLAY. Avoids the
+// "two decks playing at once" footgun.
+async function handOffPlayer(prev, next) {
+  const samePlayer = prev && next && prev.backend === next.backend && prev.id === next.id;
+  if (samePlayer) return;
+
+  const item = state.currentItem;
+
+  // 1. Stop + clear the old deck (best-effort).
+  if (prev) {
+    try { await drivers[prev.backend]?.eject(prev); } catch {}
+  }
+
+  // 2. Switch.
+  state.player = next;
+  storePlayer(next);
+  setTransportEnabled(!!next);
+
+  // 3. Reload the tape on the new deck, paused.
+  if (next && item && item.tracks && item.tracks.length) {
+    try {
+      const urls = item.tracks.map((t) => t.url);
+      await drivers[next.backend].loadShow(next, urls);
+      setNowPlaying({
+        album: showAlbumLabel(item),
+        track: item.tracks[0].title || item.tracks[0].name,
+        side: "A",
+      });
+      $("#deck").classList.remove("is-playing");
+      showInsertFor(item, item.tracks[0].url);
+      setSpools(0);
+      toast(`▸ tape moved to ${next.name} · press PLAY`);
+    } catch (e) {
+      handlePlayerError(e);
+    }
+  } else if (!next) {
+    // Switched to "no player" — clear the deck UI.
+    hideInsert();
+    setNowPlaying({ album: "no player selected", track: "— slot empty —" });
+  }
+
+  refreshStatus();
 }
 
 function setTransportEnabled(enabled) {
@@ -988,7 +1785,7 @@ async function refreshStatus() {
   }
 
   try {
-    const s = await API.status(state.player);
+    const s = await driver().status(state.player);
     const isPlaying = s.mode === "play";
     deck.classList.toggle("is-playing", isPlaying);
     updateKeyStates(s.mode || "stop");
@@ -1083,8 +1880,8 @@ function updateCounter(seconds) {
   const total = Math.max(0, Math.floor(seconds || 0));
   const m = Math.floor(total / 60);
   const s = total % 60;
-  // counter format: MMM·SS so listeners see minute count rolling
-  const txt = String(m).padStart(3, "0") + String(s).padStart(1, "0");
+  // counter format: MM·SS so listeners see minute count rolling
+  const txt = String(m).padStart(3, "0") + String(s).padStart(2, "0");
   const digits = txt.slice(-4);
   counter.querySelectorAll("span").forEach((sp, i) => {
     sp.textContent = digits[i] || "0";
@@ -1118,14 +1915,76 @@ async function transport(action) {
   }
 
   try {
-    if (action === "play")       await API.start(state.player);
-    else if (action === "pause") await API.pause(state.player);
-    else if (action === "stop")  await API.stop(state.player);
-    else if (action === "next")  await API.next(state.player);
-    else if (action === "prev")  await API.prev(state.player);
+    if (action === "play")       await driver().start(state.player);
+    else if (action === "pause") await driver().pause(state.player);
+    else if (action === "stop")  await driver().stop(state.player);
+    else if (action === "next") {
+      // Lyrion's `playlist jump +1` loops back to the same track when at the
+      // end of a single-item queue, which reads as "FF restarted my track."
+      // Suppress the no-op call when we know there's nowhere to go.
+      const last = await currentQueuePosition();
+      if (last && last.idx != null && last.idx + 1 >= last.total) {
+        toast("end of tape", "ok");
+      } else {
+        await driver().next(state.player);
+      }
+    }
+    else if (action === "prev") {
+      // Standard cassette/cd behavior: REW restarts the current track if
+      // we're more than a few seconds in, otherwise jumps to the previous.
+      const elapsed = state.spoolCtx
+        ? (state.spoolCtx.timeAtPoll + (state.spoolCtx.isPlaying ? (Date.now() - state.spoolCtx.atMs) / 1000 : 0))
+        : 0;
+      if (elapsed > 3) await driver().seek(state.player, -Math.max(1, Math.round(elapsed)));
+      else await driver().prev(state.player);
+    }
     setTimeout(refreshStatus, 350);
   } catch (e) {
-    handleLyrionError(e);
+    handlePlayerError(e);
+  }
+}
+
+// Single click → track skip / restart. Double click within 240ms → ±30s seek.
+let _ffRewClick = null;
+function handleFfRew(action, btn) {
+  Sound.keyDown();
+  if (_ffRewClick && _ffRewClick.action === action) {
+    clearTimeout(_ffRewClick.timer);
+    _ffRewClick = null;
+    btn.classList.add("is-pressed");
+    setTimeout(() => btn.classList.remove("is-pressed"), 240);
+    seekBy(action === "next" ? 30 : -30);
+    return;
+  }
+  if (_ffRewClick) clearTimeout(_ffRewClick.timer);
+  _ffRewClick = {
+    action,
+    timer: setTimeout(() => { _ffRewClick = null; transport(action); }, 240),
+  };
+}
+
+// Best-effort current queue position so we can avoid the Lyrion "jump +1
+// loops back to the same track" behavior on a single-item queue.
+async function currentQueuePosition() {
+  try {
+    const s = await driver().status(state.player);
+    const idx = (s && typeof s.playlist_index === "number") ? s.playlist_index : null;
+    const total = (s && typeof s.playlist_tracks === "number") ? s.playlist_tracks : null;
+    if (idx == null || total == null) return null;
+    return { idx, total };
+  } catch {
+    return null;
+  }
+}
+
+async function seekBy(deltaSeconds) {
+  if (!state.player) { toast("pick a player first", "error"); return; }
+  try {
+    await driver().seek(state.player, deltaSeconds);
+    toast(deltaSeconds > 0 ? `▸▸ +${deltaSeconds}s` : `◂◂ ${deltaSeconds}s`);
+    setTimeout(refreshStatus, 200);
+  } catch (e) {
+    handlePlayerError(e);
   }
 }
 
@@ -1139,9 +1998,9 @@ async function ejectTape() {
     setTimeout(() => ejectKey.classList.remove("is-pressed"), 320);
   }
   try {
-    await API.eject(state.player);
+    await driver().eject(state.player);
   } catch (e) {
-    handleLyrionError(e);
+    handlePlayerError(e);
     return;
   }
   hideInsert();
@@ -1165,26 +2024,32 @@ function init() {
   });
 
   $("#player").addEventListener("change", (e) => {
-    state.player = e.target.value;
-    if (state.player) localStorage.setItem("lab.player", state.player);
-    else localStorage.removeItem("lab.player");
-    setTransportEnabled(!!state.player);
-    refreshStatus();
+    const key = e.target.value;
+    const prev = state.player;
+    let next = null;
+    if (key) {
+      const match = (state.playerList || []).find((p) => `${p.backend}:${p.id}` === key);
+      if (match) next = { backend: match.backend, id: match.id, name: match.name };
+    }
+    handOffPlayer(prev, next);
   });
 
-  $$('input[name="fmt"]').forEach((r) =>
+  $$('input[name="fmt"], input[name="source"]').forEach((r) =>
     r.addEventListener("change", () => {
       if (state.lastQuery) doSearch();
     })
   );
+  $("#creatorOnly").addEventListener("change", () => {
+    if (state.lastQuery) doSearch();
+  });
 
   $$(".key").forEach((b) =>
     b.addEventListener("click", () => {
-      Sound.keyDown();
       const action = b.dataset.action;
-      if (action === "rec")         recordTape();
-      else if (action === "eject")  ejectTape();
-      else                          transport(action);
+      if (action === "rec")                         { Sound.keyDown(); recordTape(); }
+      else if (action === "eject")                  { Sound.keyDown(); ejectTape(); }
+      else if (action === "next" || action === "prev") handleFfRew(action, b);
+      else                                          { Sound.keyDown(); transport(action); }
     })
   );
 
@@ -1199,6 +2064,121 @@ function init() {
   $("#openDrawer").addEventListener("click", openDrawer);
   $("#closeDrawer").addEventListener("click", closeDrawer);
   $("#drawerBackdrop").addEventListener("click", closeDrawer);
+  $("#drawerSort").addEventListener("change", renderDrawer);
+  $("#caseBack").addEventListener("click", closeTapeCase);
+  $("#caseLoad").addEventListener("click", loadCurrentCaseTape);
+  $("#caseDiscard").addEventListener("click", discardCurrentCaseTape);
+
+  // ▤ Grab button on the cassette insert (deck) — saves loaded tape to drawer.
+  $("#insertGrab").addEventListener("click", grabCurrentTape);
+
+  // mix tape tray
+  $("#mixSave").addEventListener("click", openMixSaveModal);
+  $("#mixClear").addEventListener("click", clearMix);
+  renderMixTray();
+
+  // mix-save modal
+  $("#mixSaveBackdrop").addEventListener("click", closeMixSaveModal);
+  $("#mixSaveClose").addEventListener("click", closeMixSaveModal);
+  $("#mixSaveCancel").addEventListener("click", closeMixSaveModal);
+  $("#mixSaveCover").addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    const preview = $("#mixSavePreview");
+    if (!f) { preview.hidden = true; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      preview.style.backgroundImage = `url("${reader.result}")`;
+      preview.hidden = false;
+    };
+    reader.readAsDataURL(f);
+  });
+  $("#mixSaveForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = ($("#mixSaveName").value || "").trim()
+      || `Mix · ${new Date().toLocaleDateString()}`;
+    const file = $("#mixSaveCover").files?.[0] || null;
+    const status = $("#mixSaveStatus");
+    try {
+      let coverUrl = "";
+      if (file) {
+        status.textContent = "uploading cover…";
+        coverUrl = await uploadMixCover(file);
+      }
+      status.textContent = "recording…";
+      await saveMixToDrawer({ title: name, coverUrl });
+      closeMixSaveModal();
+    } catch (err) {
+      status.textContent = "";
+      toast(`couldn't save mix · ${err.message}`, "error");
+    }
+  });
+
+  // settings modal
+  $("#openSettings").addEventListener("click", openSettings);
+  $("#closeSettings").addEventListener("click", closeSettings);
+  $("#settingsBackdrop").addEventListener("click", closeSettings);
+  $("#settingsForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const url = $("#settingsLyrionUrl").value.trim();
+    try {
+      await API.saveSettings({ lyrion_url: url || null });
+      toast("settings saved · refreshing players");
+      await loadPlayers();
+      closeSettings();
+    } catch (err) {
+      toast(`couldn't save · ${err.message}`, "error");
+    }
+  });
+  $("#rescanPlayers").addEventListener("click", async () => {
+    try {
+      await API.rescan();
+      await loadPlayers();
+      toast("↻ rescanned");
+    } catch (err) {
+      toast(`rescan failed · ${err.message}`, "error");
+    }
+  });
+  $("#discoverLyrion").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "↻ scanning…";
+    try {
+      const { servers } = await API.discoverLyrion();
+      if (!servers || !servers.length) {
+        toast("no LMS found on the network", "error");
+        return;
+      }
+      // If only one server: auto-fill. If multiple: prompt to pick.
+      let pick = servers[0];
+      if (servers.length > 1) {
+        const choices = servers.map((s, i) => `${i + 1}. ${s.name} → ${s.jsonrpc_url}`).join("\n");
+        const ans = window.prompt(`Found ${servers.length} servers — pick one:\n${choices}`, "1");
+        const n = parseInt(ans || "0", 10);
+        if (!n || n < 1 || n > servers.length) return;
+        pick = servers[n - 1];
+      }
+      $("#settingsLyrionUrl").value = pick.jsonrpc_url;
+      toast(`✓ found ${pick.name} at ${pick.hostname || pick.host}`);
+    } catch (err) {
+      toast(`discovery failed · ${err.message}`, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+  $("#refreshArtwork").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "↻ refreshing…";
+    try {
+      await refreshAllArtworkColors();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {

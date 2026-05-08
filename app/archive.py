@@ -10,6 +10,7 @@ import httpx
 SEARCH_URL = "https://archive.org/advancedsearch.php"
 METADATA_URL = "https://archive.org/metadata/{identifier}"
 DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+IMAGE_URL = "https://archive.org/services/img/{identifier}"
 
 # Highest priority first.
 FORMAT_PRIORITY = ["24bit Flac", "Flac", "VBR MP3", "Ogg Vorbis"]
@@ -39,16 +40,65 @@ def _track_index(track_field: Any) -> int:
         return 10_000
 
 
-def build_query(q: str, year: str | None = None, fmt: str | None = "flac") -> str:
+# Collections that produce noise for music searches (radio shows, news,
+# audiobooks, etc.). Excluded from every source preset except `radio`.
+_NOISE_NOT = (
+    "NOT collection:(radioprograms OR oldtimeradio OR audio_news "
+    "OR librivox OR audio_religion OR audio_bookspoetry "
+    "OR audio_podcast OR 911_fdny_dispatches)"
+)
+
+# Title-text heuristic for "this is a live recording / bootleg / broadcast."
+# Used because most bands aren't in the curated Live Music Archive (etree)
+# — Traffic, Pink Floyd, Hendrix, etc. live tapes sit in opensource_audio
+# / audio_music with no clean "is_live" flag, but their titles almost
+# always contain one of these words.
+_LIVE_HINTS = (
+    "(title:live OR title:concert OR title:fillmore OR title:broadcast "
+    "OR title:bootleg OR title:tour OR title:festival OR title:roadcase)"
+)
+
+SOURCE_FILTERS: dict[str, str] = {
+    # Curated live archive OR title-hint match. Catches both etree and
+    # community bootleg uploads.
+    "live":   f"(collection:etree OR {_LIVE_HINTS}) AND {_NOISE_NOT}",
+    # Studio releases / catalog music. Push live-titled items out so the
+    # ALBUMS view stays close to what you'd buy on vinyl.
+    "albums": f"collection:audio_music AND NOT {_LIVE_HINTS} AND {_NOISE_NOT}",
+    # Explicit radio / spoken-word.
+    "radio":  "collection:(radioprograms OR oldtimeradio OR audio_news)",
+    # Everything except clearly-not-music collections.
+    "all":    _NOISE_NOT,
+}
+
+
+def build_query(
+    q: str,
+    year: str | None = None,
+    fmt: str | None = "flac",
+    source: str | None = "live",
+    creator_only: bool = False,
+) -> str:
     """Compose a Lucene-style query from user inputs."""
     parts: list[str] = []
-    if q and q.strip():
-        parts.append(f"({q.strip()})")
+    qstrip = (q or "").strip()
+    if qstrip:
+        if creator_only:
+            # Force the query to match the creator field — e.g. searching
+            # "Traffic" only finds items whose creator IS Traffic, never
+            # items whose description merely mentions traffic.
+            escaped = qstrip.replace('"', '\\"')
+            parts.append(f'creator:"{escaped}"')
+        else:
+            parts.append(f"({qstrip})")
     parts.append("mediatype:audio")
     if year:
         parts.append(f"date:{year}*")
     if fmt and fmt.lower() == "flac":
         parts.append("format:Flac")
+    src = SOURCE_FILTERS.get((source or "all").lower(), "")
+    if src:
+        parts.append(src)
     return " AND ".join(parts)
 
 
@@ -57,11 +107,13 @@ async def search(
     q: str,
     year: str | None = None,
     fmt: str | None = "flac",
+    source: str | None = "live",
+    creator_only: bool = False,
     rows: int = 50,
     start: int = 0,
 ) -> list[dict[str, Any]]:
     """Run an advanced search; return simplified result rows."""
-    query = build_query(q, year=year, fmt=fmt)
+    query = build_query(q, year=year, fmt=fmt, source=source, creator_only=creator_only)
     params: list[tuple[str, str]] = [
         ("q", query),
         ("output", "json"),
@@ -90,13 +142,15 @@ async def search(
         creator = d.get("creator", "")
         if isinstance(creator, list):
             creator = ", ".join(creator)
+        ident = d.get("identifier")
         results.append({
-            "identifier": d.get("identifier"),
+            "identifier": ident,
             "title": d.get("title", ""),
             "date": date,
             "creator": creator,
             "description_snippet": snippet,
             "downloads": d.get("downloads", 0),
+            "image_url": IMAGE_URL.format(identifier=ident) if ident else "",
         })
     return results
 
@@ -363,5 +417,6 @@ async def get_item(client: httpx.AsyncClient, identifier: str) -> dict[str, Any]
         "creator": creator,
         "date": date,
         "description": desc,
+        "image_url": IMAGE_URL.format(identifier=identifier),
         "tracks": tracks,
     }

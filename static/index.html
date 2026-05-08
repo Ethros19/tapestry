@@ -42,6 +42,9 @@
           <span>Search archive</span>
           <kbd class="btn--search__kbd">/</kbd>
         </button>
+        <button id="openSettings" class="btn btn--search btn--gear" type="button" aria-label="settings" title="Settings">
+          <span class="btn--search__icon">⚙</span>
+        </button>
       </div>
     </div>
     <div class="topbar__rule" aria-hidden="true"></div>
@@ -156,6 +159,7 @@
           <span class="insert__brand">cassette insert</span>
           <span class="insert__divider" aria-hidden="true">— · —</span>
           <span class="insert__date" id="insertDate">—</span>
+          <button id="insertGrab" class="btn btn--ghost insert__grab" type="button" title="Save this tape to the drawer">▤ Grab</button>
         </header>
         <h2 class="insert__title" id="insertTitle">—</h2>
         <p class="insert__creator" id="insertCreator">—</p>
@@ -197,6 +201,85 @@
   <div id="banner" class="banner" role="status" hidden></div>
   <div class="toasts" id="toasts" aria-live="polite"></div>
 
+  <!-- in-app playback engine for the "This Mac" player -->
+  <audio id="localAudio" preload="auto" hidden></audio>
+
+  <!-- Mix-tape tray: pinned to the viewport while a mix is in progress.
+       Visible across the deck, search, and drawer so the user can build
+       a mix from any source. -->
+  <div id="mixTray" class="mix-tray" hidden>
+    <span class="mix-tray__stamp">[ MIX · TAPE ]</span>
+    <span class="mix-tray__meter">
+      <span id="mixCount">0 tracks</span>
+      <span class="mix-tray__sep" aria-hidden="true">·</span>
+      <span id="mixTime">0:00 / 90:00</span>
+    </span>
+    <progress id="mixProgress" max="5400" value="0" class="mix-tray__bar"></progress>
+    <button id="mixSave" type="button" class="btn btn--solid">▸ Record</button>
+    <button id="mixClear" type="button" class="btn btn--ghost">Discard</button>
+  </div>
+
+  <!-- ============== MIX TAPE SAVE MODAL ============== -->
+  <div class="modal" id="mixSaveModal" hidden role="dialog" aria-modal="true" aria-labelledby="mixSaveTitle">
+    <div class="modal__backdrop" id="mixSaveBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel" style="width:min(560px,100%);">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ MIX · TAPE ]</span>
+          <h2 id="mixSaveTitle">Name your mix tape</h2>
+        </div>
+        <button id="mixSaveClose" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+
+      <form id="mixSaveForm" autocomplete="off" style="display:block;">
+        <label class="field" style="display:block;margin-bottom:14px;">
+          <span class="field__hint">NAME</span>
+          <input id="mixSaveName" type="text" spellcheck="false" placeholder="Mix · Friday Night" style="width:100%;">
+        </label>
+        <label class="field" style="display:block;margin-bottom:14px;">
+          <span class="field__hint">COVER · OPTIONAL</span>
+          <input id="mixSaveCover" type="file" accept="image/*" style="display:block;font-family:var(--font-mono);font-size:11px;color:var(--ink-2);">
+        </label>
+        <div id="mixSavePreview" hidden style="width:120px;height:120px;background-size:cover;background-position:center;border:1px solid var(--rule);border-radius:1px;margin-bottom:16px;"></div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;">
+          <span id="mixSaveStatus" style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);"></span>
+          <button id="mixSaveCancel" type="button" class="btn btn--ghost">Cancel</button>
+          <button type="submit" class="btn btn--go">▸ Record</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ============== SETTINGS MODAL ============== -->
+  <div class="modal" id="settingsModal" hidden role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <div class="modal__backdrop" id="settingsBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ DECK · SETTINGS ]</span>
+          <h2 id="settingsModalTitle">Tapestry settings</h2>
+        </div>
+        <button id="closeSettings" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+
+      <form id="settingsForm" class="modal__form" autocomplete="off" style="display:block;">
+        <label class="field" style="display:block;margin-bottom:14px;">
+          <span class="field__hint">LYRION URL</span>
+          <div style="display:flex;gap:8px;align-items:stretch;">
+            <input id="settingsLyrionUrl" type="text" spellcheck="false" placeholder="http://your-lms-host:9000/jsonrpc.js" style="flex:1;">
+            <button id="discoverLyrion" class="btn btn--ghost" type="button" title="Find LMS on this network">↻ Find LMS</button>
+          </div>
+          <span class="field__note" id="settingsLyrionSource" style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.6;display:block;margin-top:4px;"></span>
+        </label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn--go" type="submit">Save&nbsp;▸</button>
+          <button id="rescanPlayers" class="btn btn--ghost" type="button">↻ Rescan players</button>
+          <button id="refreshArtwork" class="btn btn--ghost" type="button">↻ Refresh artwork colors</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- ============== SEARCH MODAL ============== -->
   <div class="modal" id="searchModal" hidden role="dialog" aria-modal="true" aria-labelledby="searchModalTitle">
     <div class="modal__backdrop" id="modalBackdrop" aria-hidden="true"></div>
@@ -228,6 +311,23 @@
             <label for="fmt-any">ANY</label>
           </div>
         </fieldset>
+        <fieldset class="field field--src">
+          <span class="field__hint">SOURCE</span>
+          <div class="seg" role="radiogroup">
+            <input type="radio" id="src-live" name="source" value="live" checked>
+            <label for="src-live">LIVE</label>
+            <input type="radio" id="src-albums" name="source" value="albums">
+            <label for="src-albums">ALBUMS</label>
+            <input type="radio" id="src-radio" name="source" value="radio">
+            <label for="src-radio">RADIO</label>
+            <input type="radio" id="src-all" name="source" value="all">
+            <label for="src-all">ALL</label>
+          </div>
+        </fieldset>
+        <label class="field field--creator" style="display:flex;align-items:center;gap:6px;">
+          <input id="creatorOnly" type="checkbox">
+          <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);">Match&nbsp;artist&nbsp;only</span>
+        </label>
         <button class="btn btn--go" type="submit">Search&nbsp;▸</button>
       </form>
 
@@ -254,6 +354,7 @@
           <span class="loading__text">SEARCHING · · ·</span>
         </div>
       </div>
+
     </div>
   </div>
 
@@ -271,6 +372,17 @@
       <p class="modal__caption">
         click a tape to load it on the deck · the × discards it
       </p>
+      <div class="drawer__toolbar" style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin:0 0 6px;">
+        <span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);">Sort</span>
+        <select id="drawerSort" style="background:var(--paper);border:1px solid var(--rule);color:var(--ink);font-family:var(--font-mono);font-size:11px;padding:4px 8px;border-radius:1px;">
+          <option value="saved-desc">Saved · newest</option>
+          <option value="saved-asc">Saved · oldest</option>
+          <option value="title-asc">Title A→Z</option>
+          <option value="creator-asc">Artist A→Z</option>
+          <option value="date-desc">Year · newest</option>
+          <option value="date-asc">Year · oldest</option>
+        </select>
+      </div>
       <div class="drawer">
         <div class="drawer__empty" id="drawerEmpty">
           <div class="empty__stamp">[ DRAWER · EMPTY ]</div>
@@ -280,6 +392,34 @@
           </p>
         </div>
         <div class="drawer__grid" id="drawerGrid"></div>
+
+        <!-- Cassette case view: shown when the user clicks a tape. -->
+        <div class="drawer__case" id="drawerCase" hidden>
+          <div class="drawer__case-bar">
+            <button id="caseBack" class="btn btn--ghost" type="button">← Back to drawer</button>
+            <div class="drawer__case-actions">
+              <button id="caseLoad" class="btn btn--solid" type="button">▸ Load whole tape</button>
+              <button id="caseDiscard" class="btn btn--ghost" type="button">× Discard tape</button>
+            </div>
+          </div>
+          <div class="drawer__case-head">
+            <div id="caseArt" class="drawer__case-art" aria-hidden="true"></div>
+            <div class="drawer__case-info">
+              <div class="drawer__case-spine" id="caseSpine" aria-hidden="true">
+                <span class="tape__band"></span>
+                <span class="tape__paper">
+                  <span class="tape__creator" id="caseCreator"></span>
+                  <span class="tape__title" id="caseTitle"></span>
+                </span>
+              </div>
+              <div class="drawer__case-meta">
+                <span id="caseDate" class="drawer__case-date"></span>
+                <span id="caseCount" class="drawer__case-count"></span>
+              </div>
+            </div>
+          </div>
+          <div id="caseTracks"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -316,6 +456,7 @@
         </div>
         <div class="card__actions">
           <button class="btn btn--ghost card__expand" type="button">Tracks&nbsp;▾</button>
+          <button class="btn btn--ghost card__grab" type="button" title="Save to drawer">▤ Grab</button>
           <button class="btn btn--solid card__play-show" type="button">▸ Load&nbsp;tape</button>
         </div>
       </div>
