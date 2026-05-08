@@ -36,15 +36,23 @@ The archive.org plugin bundled with Lyrion is a favorites browser, not a search 
 
 ## Quick start
 
+**Requires Python 3.11 or newer.** macOS ships 3.9 by default — install via
+[Homebrew](https://brew.sh) (`brew install python@3.13`) if needed.
+
 ```bash
 git clone https://github.com/Ethros19/tapestry.git
 cd tapestry
-python3 -m venv .venv && source .venv/bin/activate
+python3.13 -m venv .venv && source .venv/bin/activate   # or python3.11/3.12
 pip install -r requirements.txt
+
 LYRION_URL=http://your-lms-host:9000/jsonrpc.js \
   uvicorn app.main:app --reload --port 8080
 # → http://localhost:8080
 ```
+
+If everything's wired up correctly you'll see your players in the dropdown
+in the top bar. If the offline banner shows up, `LYRION_URL` is wrong or
+your LMS isn't reachable from this machine.
 
 ## Configuration
 
@@ -53,6 +61,46 @@ LYRION_URL=http://your-lms-host:9000/jsonrpc.js \
 | `LYRION_URL` | `http://localhost:9000/jsonrpc.js` | JSON-RPC endpoint of your LMS |
 
 Players are auto-discovered from LMS at startup — pick one from the dropdown in the top bar.
+
+## Working from another machine
+
+Picking up the project on a second machine? After cloning + setting up the
+venv, two extra things to know:
+
+### Bring your drawer with you
+
+The tape drawer (saved cassettes) lives at `data/drawer.json` and is
+**gitignored on purpose** — it's user data, not source. To carry your
+collection over once:
+
+```bash
+scp source-machine:path/to/tapestry/data/drawer.json data/
+```
+
+For ongoing sync, point a Syncthing / iCloud / Dropbox folder at `data/` so
+new entries flow between machines automatically.
+
+### Network reachability
+
+Lyrion typically advertises itself as an mDNS hostname (e.g.
+`SomeHost.local`) which only resolves on the **same local network**. If you
+want to use Tapestry from outside that LAN:
+
+- **VPN/tunnel back to home** — Tailscale, WireGuard, or your router's VPN
+  works fine; once on the VPN, `LYRION_URL=http://lms-host.local:9000/jsonrpc.js`
+  resolves as usual.
+- **Public endpoint** — point `LYRION_URL` at a forwarded port or reverse
+  proxy (consider auth — LMS has no built-in auth).
+- **Local-only LMS** — run a second LMS instance on the laptop itself,
+  pointed at a separate music library, and use `LYRION_URL=http://localhost:9000/jsonrpc.js`.
+
+### First-run checklist
+
+1. ✅ Python 3.11+ active in your venv (`python --version`)
+2. ✅ `pip install -r requirements.txt` finished without errors
+3. ✅ LMS is reachable from this machine — `curl $LYRION_URL` should return `{"error":"...invalid method..."}` (a 200 response from the JSON-RPC handler counts as reachable)
+4. ✅ At least one player is registered with that LMS instance and shows up in the topbar dropdown
+5. ✅ Hard-refresh the browser (Cmd+Shift+R) on first load to ensure CSS/JS aren't cached from any previous Tapestry instance
 
 ## Architecture
 
