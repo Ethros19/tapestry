@@ -20,3 +20,6 @@ mix-covers/
 # Tooling/clutter
 .agents/
 skills-lock.json
+
+# Raw CleanShot exports — only the optimized copies in docs/ get committed
+screenshots/

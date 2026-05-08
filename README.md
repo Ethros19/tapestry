@@ -4,7 +4,7 @@ A vintage cassette deck for [archive.org](https://archive.org) → your network 
 
 > **Tape · stry** — *woven from the live music archive.*
 
-![Tapestry](docs/tapestry.png)
+![Tapestry — Pink Floyd Live, 1977-02-22 Pavillon, Paris loaded on the deck](docs/deck-loaded.png)
 
 ---
 
@@ -153,6 +153,20 @@ OpenAPI docs at `/docs` while the server is running.
 ## Run as a background service (macOS, headless mode)
 
 A launchd plist at `~/Library/LaunchAgents/com.ethros.tapestry.plist` with `RunAtLoad=true` and `KeepAlive=true` works fine — point its `WorkingDirectory` at the cloned repo and its `ProgramArguments` at the venv's `uvicorn`. Useful if you'd rather keep Tapestry running and access it from any browser on your network.
+
+## Screenshots
+
+**Search.** `LIVE` filter is on by default — etree archive plus title-heuristic concert/bootleg matches across the whole catalog, with audiobook / radio-news collections explicitly excluded. The "Match artist only" toggle pins the query to the `creator` field for paranoid filtering.
+
+![Search modal with results for Pink Floyd](docs/search.png)
+
+**Drawer.** Each saved tape is a horizontal cassette spine — band color, paper, ink and font are all derived deterministically from the item's identifier (or extracted from the album artwork when available, so the spine matches the cover).
+
+![Tape drawer — saved cassettes laid out as spines](docs/drawer.png)
+
+**Drawer · case open.** Click a spine and the case "flips open": album art, full track list, per-track ▸ play / ⤓ play next / ＋ add to queue / **▤ add to mix**, plus a single **▸ Load whole tape** action. Building a mix tape from your saved drawer is faster than searching twice.
+
+![Open drawer case showing album art and track list](docs/drawer-case-open.png)
 
 ## License
 
