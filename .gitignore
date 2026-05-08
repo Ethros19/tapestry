@@ -26,3 +26,6 @@ screenshots/
 
 # Local-only scratch (launch post drafts, todo lists, etc.)
 notes/
+
+# Personal folder — handoff notes, drafts, anything you don't want public
+personal/
