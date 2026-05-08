@@ -86,7 +86,7 @@ The app finds your LMS automatically the first time you open Settings (⚙) and 
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `LYRION_URL` | `http://localhost:9000/jsonrpc.js` | JSON-RPC endpoint of your LMS. Overridden by Settings panel. |
+| `LYRION_URL` | `http://192.168.1.xx:9000/jsonrpc.js` | JSON-RPC endpoint of your LMS. Overridden by Settings panel. |
 | `TAPESTRY_DATA_DIR` | `~/Library/Application Support/Tapestry/` (or `./data/` in dev) | Where the drawer, settings, and mix-tape covers live. |
 
 The Settings panel (⚙ in the topbar) also exposes:
