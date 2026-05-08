@@ -8,3 +8,15 @@ data/*.json
 *.swp
 .idea/
 .vscode/
+
+# Build artifacts
+dist/
+build/
+*.spec
+
+# User data
+mix-covers/
+
+# Tooling/clutter
+.agents/
+skills-lock.json

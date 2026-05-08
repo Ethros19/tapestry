@@ -58,7 +58,7 @@ async def discover_servers(timeout: float = 3.0) -> list[dict[str, Any]]:
         if not (host or hostname):
             return
         # Prefer the human-readable hostname for the URL — works on the
-        # same LAN via mDNS, so http://AntiVort.local:9000/jsonrpc.js
+        # same LAN via mDNS, so e.g. http://lms.local:9000/jsonrpc.js
         # rather than the raw IP.
         target = hostname or host
         instance_name = name.split(f".{service_type}")[0] if name.endswith(service_type) else name
