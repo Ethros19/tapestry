@@ -1764,6 +1764,7 @@ kbd {
   align-items: center;
   gap: 16px;
 }
+.loading[hidden] { display: none !important; }
 .reels { display: flex; align-items: center; gap: 8px; }
 .reel {
   width: 36px; height: 36px;

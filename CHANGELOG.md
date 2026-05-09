@@ -2,6 +2,11 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.1.2] — 2026-05-09
+
+### Fixed
+- Search "SEARCHING · · ·" reel animation kept spinning after results came back. Same root cause as the 1.1.0 mix-tray fix — `.loading` had `display: flex` which beat the browser's default `[hidden] { display: none }`. Added an explicit `.loading[hidden]` rule.
+
 ## [1.1.1] — 2026-05-09
 
 ### Changed
