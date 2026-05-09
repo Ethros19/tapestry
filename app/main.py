@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
         await app.state.http.aclose()
 
 
-app = FastAPI(title="Tapestry", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Tapestry", version="1.1.1", lifespan=lifespan)
 
 
 class PlayBody(BaseModel):

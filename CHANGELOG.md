@@ -2,6 +2,14 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.1.1] — 2026-05-09
+
+### Changed
+- Search results increased from 40 to 100 rows per query.
+
+### Fixed
+- Empty-drawer blurb pointed to the wrong key (REC, which builds mix tapes); now points to ▤ Grab, which is what actually files a tape.
+
 ## [1.1.0] — 2026-05-08
 
 ### Added

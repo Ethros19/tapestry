@@ -174,7 +174,7 @@ const API = {
     if (fmt)  p.set("fmt", fmt);
     if (source) p.set("source", source);
     if (creatorOnly) p.set("creator_only", "true");
-    p.set("rows", "40");
+    p.set("rows", "100");
     return api(`/api/search?${p}`);
   },
   item: (id) => api(`/api/item/${encodeURIComponent(id)}`),
