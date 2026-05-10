@@ -2,6 +2,11 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.1.4] — 2026-05-10
+
+### Reverted
+- Rolled back the local-audio error-recovery change from 1.1.3. The added `error` listener / cap / `localPlay` helper introduced new playback issues in real use. 1.1.4 is identical to 1.1.2 functionally; the underlying "freeze on bad track" bug from 1.1.3's commit message is still open and will be re-fixed once we can reproduce it under devtools.
+
 ## [1.1.2] — 2026-05-09
 
 ### Fixed
