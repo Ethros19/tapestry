@@ -213,7 +213,7 @@ const apiDriver = {
   seek:     (p, delta) => post(apiPath(p, "seek_by"),    { delta }),
 };
 
-const localCtx = { queue: [], idx: 0 };
+const localCtx = { queue: [], idx: 0, consecutiveErrors: 0 };
 let localAudio = null;
 function ensureLocalAudio() {
   if (localAudio) return localAudio;
@@ -222,16 +222,51 @@ function ensureLocalAudio() {
   localAudio.addEventListener("ended", () => {
     if (localCtx.idx + 1 < localCtx.queue.length) localPlayAt(localCtx.idx + 1, true);
   });
+  // Network hiccups / 404s on archive.org streams fire `error`, not `ended`.
+  // Without this handler the deck would freeze on the failed track and PLAY
+  // would silently no-op forever. Skip to the next track if there is one.
+  localAudio.addEventListener("error", () => {
+    // eject() / fresh-queue paths clear the queue before tearing down the
+    // src, which itself fires a synthetic `error`. Don't toast on tear-down.
+    if (!localCtx.queue.length) return;
+    localCtx.consecutiveErrors++;
+    const err = localAudio.error;
+    const code = err ? err.code : "?";
+    const detail = err && err.message ? ` · ${err.message}` : "";
+    // Cap the cascade. Without this a single network outage rips through
+    // the whole queue in seconds, spamming a toast per track. Three strikes
+    // and we hand control back to the user.
+    if (localCtx.consecutiveErrors >= 3) {
+      toast(`▸ multiple track errors (code ${code})${detail} · stopping`, "error");
+      return;
+    }
+    if (localCtx.idx + 1 < localCtx.queue.length) {
+      toast(`▸ track ${localCtx.idx + 1} failed (code ${code})${detail} · skipping`, "error");
+      localPlayAt(localCtx.idx + 1, true);
+    } else {
+      toast(`▸ playback error (code ${code})${detail} · end of tape`, "error");
+    }
+  });
+  // Successful playback resets the cascade counter — one bad track in an
+  // otherwise-healthy stream shouldn't leave us one strike from stopping.
+  localAudio.addEventListener("playing", () => { localCtx.consecutiveErrors = 0; });
   // Reflect transport-key state without waiting for the next poll.
   const reflect = () => {
     const wasPlaying = !localAudio.paused && !localAudio.ended;
     updateKeyStates(wasPlaying ? "play" : (localAudio.currentSrc ? "pause" : "stop"));
     refreshStatus();
   };
-  ["play", "pause", "ended", "loadedmetadata"].forEach((ev) =>
+  ["play", "pause", "ended", "loadedmetadata", "error"].forEach((ev) =>
     localAudio.addEventListener(ev, reflect),
   );
   return localAudio;
+}
+function localPlay(a) {
+  // Surface play() rejections — autoplay blocks and load failures used to
+  // be swallowed, leaving the user staring at a frozen deck.
+  return a.play().catch((e) => {
+    if (e && e.name !== "AbortError") toast(`▸ couldn't play · ${e.message || e.name}`, "error");
+  });
 }
 function localPlayAt(i, autoplay) {
   const a = ensureLocalAudio();
@@ -239,7 +274,7 @@ function localPlayAt(i, autoplay) {
   if (i < 0 || i >= localCtx.queue.length) return;
   localCtx.idx = i;
   a.src = localCtx.queue[i];
-  if (autoplay) a.play().catch(() => {});
+  if (autoplay) localPlay(a);
 }
 
 const localDriver = {
@@ -261,6 +296,7 @@ const localDriver = {
   },
   play: async (_p, url) => {
     localCtx.queue = [url];
+    localCtx.consecutiveErrors = 0;
     localPlayAt(0, true);
     return {};
   },
@@ -275,6 +311,7 @@ const localDriver = {
   },
   playShow: async (_p, urls) => {
     localCtx.queue = (urls || []).slice();
+    localCtx.consecutiveErrors = 0;
     if (localCtx.queue.length) localPlayAt(0, true);
     return { queued: localCtx.queue.length };
   },
@@ -282,6 +319,7 @@ const localDriver = {
     const a = ensureLocalAudio();
     localCtx.queue = (urls || []).slice();
     localCtx.idx = 0;
+    localCtx.consecutiveErrors = 0;
     if (a && localCtx.queue.length) {
       a.src = localCtx.queue[0];   // armed but not playing
       a.pause();
@@ -291,14 +329,17 @@ const localDriver = {
   start: async () => {
     const a = ensureLocalAudio();
     if (!a) return {};
+    // User pressed PLAY — treat as a deliberate retry, clear the cap so
+    // they're not locked out after a previous outage.
+    localCtx.consecutiveErrors = 0;
     if (!a.currentSrc && localCtx.queue.length) localPlayAt(localCtx.idx, true);
-    else a.play().catch(() => {});
+    else localPlay(a);
     return {};
   },
   pause: async () => {
     const a = ensureLocalAudio();
     if (!a) return {};
-    if (a.paused) a.play().catch(() => {}); else a.pause();
+    if (a.paused) localPlay(a); else a.pause();
     return {};
   },
   stop: async () => {
@@ -308,6 +349,7 @@ const localDriver = {
   },
   next: async () => {
     const a = ensureLocalAudio();
+    localCtx.consecutiveErrors = 0;
     if (localCtx.idx + 1 < localCtx.queue.length) {
       localPlayAt(localCtx.idx + 1, !!(a && !a.paused));
     }
@@ -315,15 +357,20 @@ const localDriver = {
   },
   prev: async () => {
     const a = ensureLocalAudio();
+    localCtx.consecutiveErrors = 0;
     if (localCtx.idx > 0) localPlayAt(localCtx.idx - 1, !!(a && !a.paused));
     else if (a) a.currentTime = 0;
     return {};
   },
   eject: async () => {
     const a = ensureLocalAudio();
-    if (a) { a.pause(); a.removeAttribute("src"); a.load(); }
+    // Clear the queue *first* — removeAttribute("src") fires a synthetic
+    // `error` in some browsers, and the empty-queue guard in the error
+    // handler is what suppresses the spurious toast.
     localCtx.queue = [];
     localCtx.idx = 0;
+    localCtx.consecutiveErrors = 0;
+    if (a) { a.pause(); a.removeAttribute("src"); a.load(); }
     return {};
   },
   seek: async (_p, delta) => {

@@ -2,6 +2,15 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.1.3] — 2026-05-10
+
+### Fixed
+- "This Mac" playback could freeze on a track and never advance — both PLAY and PAUSE keys depressed, reels stopped, tape unresponsive. Root cause: the local-audio path had no `error` listener, so a network hiccup or 404 on an archive.org FLAC fired `error` instead of `ended` and auto-advance never ran. Silent `.catch(() => {})` calls hid the failure from PLAY too.
+  - Added an `error` handler that toasts the failure and skips to the next track.
+  - Capped the cascade at 3 consecutive failures so a full outage doesn't rip through the whole queue spamming toasts.
+  - Reset the cap on successful playback (`playing` event) and on every user-initiated transport press (PLAY, FF, REW, eject, load) so the deck is never permanently locked out.
+  - Surfaced `play()` promise rejections via toast — autoplay blocks and load failures used to be invisible.
+
 ## [1.1.2] — 2026-05-09
 
 ### Fixed
