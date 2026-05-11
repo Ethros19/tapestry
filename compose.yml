@@ -1,0 +1,18 @@
+services:
+  tapestry:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - tapestry-data:/data
+    environment:
+      # Optional: point at your Lyrion / LMS server
+      #LYRION_URL: http://0.0.0.0:9000/jsonrpc.js
+      TAPESTRY_DATA_DIR: /data
+    restart: unless-stopped
+    # Needed for mDNS/Zeroconf LMS discovery across the LAN.
+    # Remove if you set LYRION_URL explicitly and don't need auto-discovery.
+    network_mode: host
+
+volumes:
+  tapestry-data:
