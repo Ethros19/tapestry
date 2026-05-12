@@ -112,15 +112,29 @@ open dist/Tapestry.app
 
 ### Sharing the .dmg
 
-The build is unsigned (ad-hoc only, via PyInstaller). When the DMG is downloaded from the internet, macOS sets a quarantine attribute on the extracted `Tapestry.app` and Gatekeeper rejects it with **“Tapestry.app” is damaged and can’t be opened.** That message is misleading — the app isn't damaged, the quarantine flag combined with the ad-hoc signature is what trips Gatekeeper.
+The build is unsigned (ad-hoc only, via PyInstaller). macOS sets a quarantine flag on the extracted `Tapestry.app` and Gatekeeper rejects it with **“Tapestry.app” is damaged and can’t be opened.** That message is misleading — the app isn't damaged, the quarantine flag combined with the ad-hoc signature is what trips Gatekeeper. Three install paths for recipients, cleanest first:
 
-Recipients drag `Tapestry.app` to `/Applications` from the DMG, then run **once** in Terminal:
+**1. Homebrew Cask (zero terminal interaction):**
+
+```bash
+brew install --cask ethros19/tapestry/tapestry
+```
+
+Homebrew downloads + mounts the DMG and copies the app over with quarantine already stripped — no Gatekeeper prompt at all.
+
+**2. DMG + bundled installer (one click):**
+
+Open the DMG and double-click **`Install Tapestry.command`**. Terminal will show a one-time "is from the internet, are you sure?" prompt; clicking through copies the app to `/Applications`, strips quarantine, and launches.
+
+**3. DMG + manual quarantine strip (power users):**
+
+Drag `Tapestry.app` to `/Applications` from the DMG, then run **once** in Terminal:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Tapestry.app
 ```
 
-After that the app launches normally and stays trusted. The in-app updater already strips quarantine on its own (`updater.py`), so future upgrades through Settings → Updates work without any manual step — the friction is only on the initial install from the DMG.
+After any of these the app launches normally and stays trusted. The in-app updater already strips quarantine on its own (`updater.py`), so future upgrades through Settings → Updates work without any manual step — the friction is only on the initial install.
 
 For a fully clean handoff with no terminal step, sign + notarize the build:
 1. Get an Apple Developer ID (`Developer ID Application` cert).

@@ -34,6 +34,50 @@ trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP_PATH" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
+# Install.command — one-click installer for users who don't want to drag +
+# run `xattr -dr com.apple.quarantine` themselves. Copies the bundled
+# Tapestry.app to /Applications, strips the quarantine flag macOS sets on
+# downloaded DMG contents, then launches the app. The script itself is
+# also quarantined on first run, so Terminal will show "is from the
+# internet, are you sure?" — one click through, then it just works.
+INSTALL_CMD="$STAGE/Install Tapestry.command"
+cat > "$INSTALL_CMD" <<'COMMAND'
+#!/usr/bin/env bash
+# Tapestry one-click installer. Copies Tapestry.app to /Applications,
+# strips the quarantine flag, and launches. Safe to re-run.
+set -e
+
+cd "$(dirname "$0")"
+
+APP_SRC="./Tapestry.app"
+APP_DST="/Applications/Tapestry.app"
+
+if [[ ! -d "$APP_SRC" ]]; then
+  echo "✗ Tapestry.app not found next to this script."
+  echo "  Run this from the mounted Tapestry DMG."
+  read -r -p "Press return to close." _
+  exit 1
+fi
+
+echo "→ installing to $APP_DST"
+if [[ -d "$APP_DST" ]]; then
+  # Quit any running instance so we can overwrite cleanly.
+  osascript -e 'tell application "Tapestry" to quit' 2>/dev/null || true
+  sleep 1
+  rm -rf "$APP_DST"
+fi
+ditto "$APP_SRC" "$APP_DST"
+
+echo "→ clearing quarantine flag"
+xattr -dr com.apple.quarantine "$APP_DST" || true
+
+echo "→ launching"
+open "$APP_DST"
+
+echo "✓ Tapestry installed. You can close this window."
+COMMAND
+chmod +x "$INSTALL_CMD"
+
 echo "→ creating compressed disk image"
 hdiutil create \
   -volname "$VOL_NAME" \

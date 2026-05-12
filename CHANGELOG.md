@@ -2,6 +2,15 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.2.1] — 2026-05-12
+
+### Added
+- **`Install Tapestry.command` in the DMG** — one-click installer that copies the app to `/Applications`, strips the quarantine flag, and launches. Recipients no longer need to run `xattr -dr com.apple.quarantine` manually after downloading. The script itself is quarantined on first run so Terminal shows "from the internet, are you sure?" once — milder than the "damaged" error the bare `.app` triggers, and a single click through.
+- **Homebrew Cask** (`Ethros19/homebrew-tapestry`) — `brew install --cask ethros19/tapestry/tapestry` is now the cleanest install path. Homebrew strips quarantine on its own, so there's no Terminal prompt at all.
+
+### Notes
+- Builds remain unsigned (no Apple Developer ID yet). For a fully friction-free direct DMG download, the `codesign` / `notarytool` stubs in `scripts/build-app.sh` and `scripts/build-dmg.sh` still need to be wired up once a Developer ID is in place.
+
 ## [1.2.0] — 2026-05-12
 
 ### Added
