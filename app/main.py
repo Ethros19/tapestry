@@ -1,7 +1,10 @@
 """FastAPI app: archive.org search → multi-backend playback bridge."""
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,15 +14,43 @@ from typing import Any
 import httpx
 import secrets
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import archive, players, settings
+from . import archive, players, settings, updater
 from .players import BackendError
+
+# Wire format for `.tape` files + share-link blobs. Bumped whenever the
+# schema changes incompatibly so older clients can refuse imports they
+# can't represent.
+TAPE_FORMAT_NAME = "tapestry-tape"
+TAPE_FORMAT_VERSION = 1
+_TAPE_EXPORT_FIELDS = frozenset({
+    "identifier", "title", "creator", "date", "track_count",
+    "band_color", "label_color", "ink_color", "font",
+    "is_mix", "tracks", "image_url",
+})
+_COVER_MIME_BY_EXT = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp",
+}
+_COVER_EXT_BY_MIME = {v: k for k, v in _COVER_MIME_BY_EXT.items() if k != ".jpeg"}
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _drawer_lock = Lock()
+
+# Cross-thread queue for .tape files opened via Finder double-click. The
+# desktop entry point's Cocoa delegate appends here; the frontend drains
+# via `/api/tape/pending-open` on boot + on window focus. Drained items
+# show the import-preview modal so the user can confirm before filing.
+_pending_imports: list[dict[str, Any]] = []
+_pending_imports_lock = Lock()
+
+
+def queue_pending_import(payload: dict[str, Any]) -> None:
+    with _pending_imports_lock:
+        _pending_imports.append(payload)
 
 # Migrate ./data/drawer.json into Application Support on first boot.
 settings.migrate_legacy_drawer()
@@ -43,14 +74,24 @@ def _save_drawer(tapes: list[dict[str, Any]]) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.http = httpx.AsyncClient(headers={"User-Agent": "tapestry/1.0"})
+    app.state.http = httpx.AsyncClient(headers={"User-Agent": f"tapestry/{updater.__version__}"})
     try:
         yield
     finally:
         await app.state.http.aclose()
 
 
-app = FastAPI(title="Tapestry", version="1.1.4", lifespan=lifespan)
+app = FastAPI(title="Tapestry", version=updater.__version__, lifespan=lifespan)
+
+
+# Set by the desktop entry point so the updater can tear down the
+# pywebview window before swapping the .app bundle on disk.
+_quit_hook: Any = None
+
+
+def register_quit_hook(fn) -> None:
+    global _quit_hook
+    _quit_hook = fn
 
 
 class PlayBody(BaseModel):
@@ -85,13 +126,14 @@ _lyrion = players.get("lyrion")
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True}
+    return {"ok": True, "version": updater.__version__}
 
 
 # ---------- settings ----------
 
 class SettingsBody(BaseModel):
     lyrion_url: str | None = None
+    auto_check_updates: bool | None = None
 
 
 @app.get("/api/settings")
@@ -102,6 +144,64 @@ async def get_settings():
 @app.post("/api/settings")
 async def update_settings(body: SettingsBody):
     return settings.update(body.model_dump(exclude_unset=True))
+
+
+# ---------- self-update ----------
+
+@app.get("/api/updates/check")
+async def updates_check():
+    """Poll GitHub Releases for the latest Tapestry build.
+
+    The check is throttled by `auto_check_updates` + `last_update_check_at`
+    in settings, but this endpoint always re-checks — it's the explicit
+    "Check now" action. The auto-check path uses `/api/updates/auto`.
+    """
+    import anyio
+    try:
+        return await anyio.to_thread.run_sync(updater.check_latest)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"update check failed: {e}")
+
+
+@app.get("/api/updates/auto")
+async def updates_auto():
+    """Throttled auto-check used on app boot. Skips when disabled or too recent."""
+    import anyio
+    if not updater.should_auto_check():
+        s = settings.get_all()
+        return {"skipped": True, "current": updater.__version__, "latest": s.get("last_known_latest") or ""}
+    try:
+        return await anyio.to_thread.run_sync(updater.check_latest)
+    except Exception as e:
+        # Auto-check failures shouldn't surface as toasts on startup.
+        return {"skipped": True, "error": str(e), "current": updater.__version__}
+
+
+class InstallUpdateBody(BaseModel):
+    download_url: str = Field(..., min_length=1)
+
+
+@app.post("/api/updates/install")
+async def updates_install(body: InstallUpdateBody):
+    """Download the DMG and hand off to a detached installer.
+
+    Refuses in dev mode (where there's no .app bundle to swap). The
+    installer waits for our PID to exit before touching disk, and we
+    fire `_quit_hook` shortly after spawning it so the window goes away
+    cleanly.
+    """
+    import anyio
+    if not updater.can_install():
+        raise HTTPException(
+            status_code=400,
+            detail="self-install is only available in the packaged Tapestry.app — download manually",
+        )
+    try:
+        return await anyio.to_thread.run_sync(
+            updater.install_update, body.download_url, _quit_hook,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"install failed: {e}")
 
 
 @app.post("/api/players/rescan")
@@ -504,6 +604,196 @@ async def drawer_delete(identifier: str):
         tapes = [t for t in _load_drawer() if t.get("identifier") != identifier]
         _save_drawer(tapes)
     return {"ok": True}
+
+
+# ---------- tape sharing (.tape files + share-link blobs) ----------
+# A "tape" is small enough to serialize whole: ~200 bytes for a grabbed
+# archive.org tape (metadata only — tracks resolve from the identifier),
+# ~2-4 KB for a mix tape with 10-20 inline tracks. Sharable two ways:
+#
+#   1. URL blob (.../?import=<base64-utf8(json)>) — fits in a copy/paste
+#      link for grabbed tapes and small mixes. Cover bytes excluded so the
+#      URL stays manageable.
+#   2. `.tape` file (`application/x-tapestry-tape`) — same JSON, but with
+#      the mix-tape cover image embedded as base64 so it travels with the
+#      tape. Imported via the drawer "Import tape" button or drag-drop
+#      onto the drawer modal.
+
+def _slugify_for_filename(s: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", s or "").strip("-")
+    return cleaned or "tape"
+
+
+def _embed_cover(image_url: str) -> dict[str, str] | None:
+    """Read the mix-tape cover off disk and base64-encode it for embedding.
+
+    Only handles in-app covers (`/covers/<filename>`); external URLs travel
+    by reference and don't need embedding. Returns None on any IO or
+    extension problem — covers are nice-to-have, not load-bearing.
+    """
+    if not image_url or not image_url.startswith("/covers/"):
+        return None
+    name = image_url[len("/covers/"):]
+    if "/" in name or ".." in name:  # path traversal guard — names are random tokens
+        return None
+    path = _COVERS_DIR / name
+    if not path.is_file():
+        return None
+    mime = _COVER_MIME_BY_EXT.get(path.suffix.lower())
+    if not mime:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return {"mime": mime, "data_b64": base64.b64encode(data).decode("ascii")}
+
+
+def _tape_export_dict(tape: dict[str, Any], embed_cover: bool = True) -> dict[str, Any]:
+    body = {k: tape.get(k) for k in _TAPE_EXPORT_FIELDS if k in tape}
+    cover = _embed_cover(tape.get("image_url", "")) if embed_cover else None
+    return {
+        "_format": TAPE_FORMAT_NAME,
+        "_version": TAPE_FORMAT_VERSION,
+        "_exported_at": int(time.time() * 1000),
+        "_exporter": f"tapestry/{updater.__version__}",
+        "tape": body,
+        "cover": cover,
+    }
+
+
+@app.get("/api/tape/{identifier}/export")
+async def tape_export(identifier: str, mode: str = "json", cover: str = "embed"):
+    """Export a tape as JSON.
+
+    `mode=file` adds a `Content-Disposition: attachment` header so the
+    browser saves it as `<title>.tape`. `cover=skip` omits the embedded
+    base64 cover (used for URL shares to keep the link short).
+    """
+    with _drawer_lock:
+        tapes = _load_drawer()
+        match = next((t for t in tapes if t.get("identifier") == identifier), None)
+    if not match:
+        raise HTTPException(status_code=404, detail=f"no tape with identifier {identifier}")
+    payload = _tape_export_dict(match, embed_cover=(cover != "skip"))
+    body = json.dumps(payload, indent=2, ensure_ascii=False)
+    if mode == "file":
+        filename = f"{_slugify_for_filename(match.get('title') or identifier)}.tape"
+        return Response(
+            content=body,
+            media_type="application/x-tapestry-tape",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+    return JSONResponse(content=payload)
+
+
+class ImportTapeBody(BaseModel):
+    payload: dict[str, Any]
+
+
+@app.get("/api/tape/pending-open")
+async def tape_pending_open() -> dict[str, Any]:
+    """Pop one queued open-file payload (or None) for the frontend to show.
+
+    Returns at most one item per call so the import-preview modal handles
+    them sequentially — if the user double-clicked several .tape files,
+    the frontend polls again after each confirm/cancel.
+    """
+    with _pending_imports_lock:
+        if not _pending_imports:
+            return {"item": None}
+        item = _pending_imports.pop(0)
+    return {"item": item}
+
+
+@app.post("/api/tape/import")
+async def tape_import(body: ImportTapeBody):
+    p = body.payload or {}
+    if p.get("_format") != TAPE_FORMAT_NAME:
+        raise HTTPException(status_code=400, detail="not a tapestry-tape document")
+    if int(p.get("_version") or 0) > TAPE_FORMAT_VERSION:
+        raise HTTPException(
+            status_code=400,
+            detail=f"tape format v{p.get('_version')} is newer than this Tapestry can read — upgrade?",
+        )
+    tape = p.get("tape") or {}
+    src_id = tape.get("identifier")
+    if not src_id:
+        raise HTTPException(status_code=400, detail="tape missing identifier")
+
+    is_mix = bool(tape.get("is_mix"))
+    # Mix tape identifiers are local-random; collisions between friends are
+    # astronomically unlikely but conceptually possible. Always remint on
+    # import and record the source for breadcrumbs. Grabbed tapes keep
+    # their archive.org identifier so loading still resolves.
+    new_id = f"mix:{secrets.token_urlsafe(6)}" if is_mix else src_id
+
+    # Re-house embedded cover (if any) under our own /covers/ tree.
+    image_url = (tape.get("image_url") or "") if not is_mix else ""
+    cover = p.get("cover")
+    if cover and isinstance(cover, dict) and cover.get("data_b64"):
+        ext = _COVER_EXT_BY_MIME.get(cover.get("mime") or "", ".jpg")
+        try:
+            data = base64.b64decode(cover["data_b64"], validate=True)
+        except (binascii.Error, ValueError):
+            data = None
+        if data and len(data) <= _COVER_MAX_BYTES:
+            name = f"{secrets.token_urlsafe(10)}{ext}"
+            try:
+                (_COVERS_DIR / name).write_bytes(data)
+                image_url = f"/covers/{name}"
+            except OSError:
+                pass
+
+    # Validate inline track URLs at the structural level — we trust the
+    # archive.org host but refuse anything obviously not an http(s) URL.
+    raw_tracks = tape.get("tracks") or []
+    tracks: list[dict[str, Any]] = []
+    if is_mix and isinstance(raw_tracks, list):
+        for t in raw_tracks:
+            if not isinstance(t, dict):
+                continue
+            url = (t.get("url") or "").strip()
+            if not url or not url.lower().startswith(("http://", "https://")):
+                continue
+            tracks.append({
+                "url": url,
+                "title": t.get("title") or "",
+                "name": t.get("name") or "",
+                "length": t.get("length") or "",
+                "lengthSec": int(t.get("lengthSec") or 0),
+                "format": t.get("format") or "",
+                "source_id": t.get("source_id") or "",
+                "source_title": t.get("source_title") or "",
+                "source_creator": t.get("source_creator") or "",
+            })
+
+    entry: dict[str, Any] = {
+        "identifier": new_id,
+        "title": str(tape.get("title") or ""),
+        "creator": str(tape.get("creator") or ""),
+        "date": str(tape.get("date") or ""),
+        "track_count": int(tape.get("track_count") or (len(tracks) if is_mix else 0)),
+        "band_color": str(tape.get("band_color") or ""),
+        "label_color": str(tape.get("label_color") or ""),
+        "ink_color": str(tape.get("ink_color") or ""),
+        "font": str(tape.get("font") or ""),
+        "is_mix": is_mix,
+        "tracks": tracks,
+        "image_url": image_url,
+        "saved_at": int(time.time() * 1000),
+    }
+    if is_mix:
+        entry["imported_from"] = src_id
+
+    with _drawer_lock:
+        tapes = [t for t in _load_drawer() if t.get("identifier") != entry["identifier"]]
+        tapes.insert(0, entry)
+        _save_drawer(tapes)
+    return {"ok": True, "tape": entry}
 
 
 # ---------- mix tape covers ----------

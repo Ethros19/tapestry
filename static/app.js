@@ -151,6 +151,9 @@ const state = {
 
 const MIX_MAX_SECONDS = 90 * 60;
 
+// Populated from /api/health at boot; used in the colophon + settings header.
+let appVersion = "";
+
 // ---------- API ----------
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -183,6 +186,12 @@ const API = {
   getSettings: () => api(`/api/settings`),
   saveSettings: (patch) => post(`/api/settings`, patch),
   discoverLyrion: () => api(`/api/lyrion/discover`),
+  checkUpdates: () => api(`/api/updates/check`),
+  autoCheckUpdates: () => api(`/api/updates/auto`),
+  installUpdate: (downloadUrl) => post(`/api/updates/install`, { download_url: downloadUrl }),
+  exportTape: (id, { cover = "embed" } = {}) =>
+    api(`/api/tape/${encodeURIComponent(id)}/export?cover=${cover}`),
+  importTape: (payload) => post(`/api/tape/import`, { payload }),
 };
 function post(path, body) {
   return api(path, { method: "POST", body: JSON.stringify(body) });
@@ -213,19 +222,34 @@ const apiDriver = {
   seek:     (p, delta) => post(apiPath(p, "seek_by"),    { delta }),
 };
 
-const localCtx = { queue: [], idx: 0 };
+// `started` distinguishes "armed but never played" (mode=stop, no keys
+// pressed) from "user pressed play, then paused" (mode=pause, PLAY+PAUSE
+// both depressed — the piano-key behavior). Without this, loadShow leaves
+// the `<audio>` element paused-with-src and the deck reads as paused.
+const localCtx = { queue: [], idx: 0, started: false };
 let localAudio = null;
+function localMode() {
+  const a = localAudio;
+  const has = !!(a && a.currentSrc);
+  if (!has) return "stop";
+  if (a.ended) return "stop";
+  if (!a.paused) return "play";
+  return localCtx.started ? "pause" : "stop";
+}
 function ensureLocalAudio() {
   if (localAudio) return localAudio;
   localAudio = $("#localAudio");
   if (!localAudio) return null;
   localAudio.addEventListener("ended", () => {
     if (localCtx.idx + 1 < localCtx.queue.length) localPlayAt(localCtx.idx + 1, true);
+    else localCtx.started = false;
   });
+  // Once the audio actually starts playing, we're past "armed" — future
+  // pauses should show as mode=pause, not mode=stop.
+  localAudio.addEventListener("play", () => { localCtx.started = true; });
   // Reflect transport-key state without waiting for the next poll.
   const reflect = () => {
-    const wasPlaying = !localAudio.paused && !localAudio.ended;
-    updateKeyStates(wasPlaying ? "play" : (localAudio.currentSrc ? "pause" : "stop"));
+    updateKeyStates(localMode());
     refreshStatus();
   };
   ["play", "pause", "ended", "loadedmetadata"].forEach((ev) =>
@@ -239,17 +263,76 @@ function localPlayAt(i, autoplay) {
   if (i < 0 || i >= localCtx.queue.length) return;
   localCtx.idx = i;
   a.src = localCtx.queue[i];
-  if (autoplay) a.play().catch(() => {});
+  applySinkId(a).then(() => {
+    if (autoplay) a.play().catch(() => {});
+  });
+}
+
+// ---------- audio output routing (setSinkId) ----------
+// Lets the user pick which macOS audio output the local backend renders to
+// (built-in speakers, BT speaker, AirPods, HDMI, USB DAC, ...). We expand
+// the server-side "This Mac" entry into one entry per output device on the
+// frontend, then route via HTMLMediaElement.setSinkId. WKWebView's support
+// is patchy; if either enumerateDevices() or setSinkId is missing we fall
+// back to the single "This Mac" entry routed to the default output.
+const sinkSupport = {
+  canList: !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices),
+  // setSinkId is on HTMLMediaElement.prototype — feature-detect lazily so
+  // we don't trip on the first ensureLocalAudio() call.
+  canRoute: typeof HTMLMediaElement !== "undefined" &&
+    typeof HTMLMediaElement.prototype.setSinkId === "function",
+};
+
+let audioOutputs = [];  // [{deviceId, label}]
+
+async function listAudioOutputs() {
+  if (!sinkSupport.canList) return [];
+  try {
+    const all = await navigator.mediaDevices.enumerateDevices();
+    return all
+      .filter((d) => d.kind === "audiooutput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label || "" }));
+  } catch {
+    return [];
+  }
+}
+
+async function applySinkId(audioEl) {
+  if (!sinkSupport.canRoute) return;
+  if (state.player?.backend !== "local") return;
+  // The "this-device" id is the default-output entry — leave sink unset.
+  const id = state.player.id;
+  if (!id || id === "this-device" || id === "default") return;
+  try {
+    await audioEl.setSinkId(id);
+  } catch (e) {
+    // Permission revoked / device gone — fall back to default, surface once.
+    if (!applySinkId._warned) {
+      applySinkId._warned = true;
+      toast(`couldn't route to ${state.player.name} · ${e.message}`, "error");
+    }
+  }
+}
+
+// Unlock device labels by requesting and immediately releasing a mic
+// stream. Browsers return empty `label` strings from enumerateDevices()
+// until the user has granted at least one media-device permission this
+// session; this is the cheapest way to flip that switch.
+async function unlockOutputLabels() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("getUserMedia not available");
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  stream.getTracks().forEach((t) => t.stop());
 }
 
 const localDriver = {
   status: async () => {
     const a = ensureLocalAudio();
     const has = !!(a && a.currentSrc);
-    const playing = has && !a.paused && !a.ended;
     const url = localCtx.queue[localCtx.idx] || "";
     return {
-      mode: playing ? "play" : (has ? "pause" : "stop"),
+      mode: localMode(),
       power: true,
       volume: a ? Math.round((a.volume || 1) * 100) : 100,
       time: a ? (a.currentTime || 0) : 0,
@@ -282,8 +365,10 @@ const localDriver = {
     const a = ensureLocalAudio();
     localCtx.queue = (urls || []).slice();
     localCtx.idx = 0;
+    localCtx.started = false;
     if (a && localCtx.queue.length) {
       a.src = localCtx.queue[0];   // armed but not playing
+      await applySinkId(a);
       a.pause();
     }
     return { queued: localCtx.queue.length, playing: false };
@@ -292,7 +377,10 @@ const localDriver = {
     const a = ensureLocalAudio();
     if (!a) return {};
     if (!a.currentSrc && localCtx.queue.length) localPlayAt(localCtx.idx, true);
-    else a.play().catch(() => {});
+    else {
+      await applySinkId(a);
+      a.play().catch(() => {});
+    }
     return {};
   },
   pause: async () => {
@@ -304,6 +392,7 @@ const localDriver = {
   stop: async () => {
     const a = ensureLocalAudio();
     if (a) { a.pause(); a.currentTime = 0; }
+    localCtx.started = false;
     return {};
   },
   next: async () => {
@@ -324,6 +413,7 @@ const localDriver = {
     if (a) { a.pause(); a.removeAttribute("src"); a.load(); }
     localCtx.queue = [];
     localCtx.idx = 0;
+    localCtx.started = false;
     return {};
   },
   seek: async (_p, delta) => {
@@ -941,6 +1031,11 @@ function refreshDrawerCount() {
 }
 
 // ---------- settings modal ----------
+// Latest release info captured by the most recent check, so the "Download
+// & install" button has a download URL to POST without re-hitting the
+// GitHub API.
+let lastUpdateInfo = null;
+
 async function openSettings() {
   $("#settingsModal").hidden = false;
   document.body.classList.add("modal-open");
@@ -952,7 +1047,115 @@ async function openSettings() {
     if (src === "env") note.textContent = "set via $LYRION_URL env var — saving here won't override it";
     else if (src === "settings") note.textContent = "from your saved settings";
     else note.textContent = "default · localhost:9000";
+    $("#settingsAutoUpdate").checked = !!s.auto_check_updates;
+    // If we already auto-checked at boot, the result is in lastUpdateInfo;
+    // otherwise render whatever we know from settings without a network hit.
+    if (lastUpdateInfo) {
+      renderUpdateStatus(lastUpdateInfo);
+    } else {
+      $("#settingsVersion").textContent = `tapestry · v${appVersion || "—"}`;
+      $("#settingsUpdateStatus").textContent = s.last_known_latest
+        ? `last seen: v${s.last_known_latest}`
+        : "";
+    }
   } catch {}
+}
+
+function renderUpdateStatus(info) {
+  const versionEl = $("#settingsVersion");
+  const statusEl = $("#settingsUpdateStatus");
+  const installBtn = $("#installUpdateBtn");
+  const releaseLink = $("#updateReleasePage");
+  if (!info) return;
+  versionEl.textContent = `tapestry · v${info.current || appVersion || "—"}`;
+  if (info.available) {
+    statusEl.textContent = `update available · v${info.latest}`;
+    statusEl.style.color = "var(--amber)";
+    installBtn.hidden = !info.can_install;
+    releaseLink.hidden = false;
+    if (info.html_url) releaseLink.href = info.html_url;
+  } else {
+    statusEl.style.color = "";
+    statusEl.textContent = info.reason
+      ? info.reason
+      : `up to date · last checked ${info.checked_at ? fmtRelTime(info.checked_at) : "just now"}`;
+    installBtn.hidden = true;
+    releaseLink.hidden = true;
+  }
+}
+
+function fmtRelTime(ms) {
+  const diff = Math.max(0, Date.now() - ms);
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
+async function checkForUpdates({ silent = false } = {}) {
+  const statusEl = $("#settingsUpdateStatus");
+  if (statusEl && !silent) statusEl.textContent = "checking…";
+  try {
+    const info = await API.checkUpdates();
+    lastUpdateInfo = info;
+    renderUpdateStatus(info);
+    return info;
+  } catch (e) {
+    if (statusEl) statusEl.textContent = `check failed · ${e.message}`;
+    if (!silent) toast(`update check failed · ${e.message}`, "error");
+    return null;
+  }
+}
+
+async function runAutoUpdateCheck() {
+  // Fire-and-forget on boot. Server throttles via last_update_check_at,
+  // so this is safe to call on every page load.
+  try {
+    const info = await API.autoCheckUpdates();
+    if (info.skipped) {
+      lastUpdateInfo = null;
+      return;
+    }
+    lastUpdateInfo = info;
+    if (info.available) {
+      const verb = info.can_install ? "open settings to install" : "see release notes";
+      toast(`▸ update available · v${info.latest} · ${verb}`);
+    }
+  } catch {
+    // Silent — boot-time check failures shouldn't bother the user.
+  }
+}
+
+async function installUpdate() {
+  const info = lastUpdateInfo;
+  if (!info || !info.available) return;
+  if (!info.can_install) {
+    // Dev mode or non-writable bundle — fall back to opening release page.
+    window.open(info.html_url, "_blank", "noopener");
+    return;
+  }
+  if (!window.confirm(`Install Tapestry v${info.latest}?\n\nTapestry will quit, the new version will be installed, then it will relaunch.`)) {
+    return;
+  }
+  const btn = $("#installUpdateBtn");
+  const statusEl = $("#settingsUpdateStatus");
+  btn.disabled = true;
+  btn.textContent = "▸ downloading…";
+  if (statusEl) statusEl.textContent = "downloading installer…";
+  try {
+    await API.installUpdate(info.download_url);
+    if (statusEl) statusEl.textContent = "installer launched · Tapestry will quit shortly";
+    btn.textContent = "▸ quitting…";
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "▸ Download & install";
+    if (statusEl) statusEl.textContent = "";
+    toast(`install failed · ${e.message}`, "error");
+  }
 }
 function closeSettings() {
   $("#settingsModal").hidden = true;
@@ -1250,6 +1453,234 @@ async function grabCurrentTape() {
   toast(isNew
     ? `▤ grabbed · ${(state.currentItem.title || "").slice(0, 50)}`
     : `▤ already in drawer · ${(state.currentItem.title || "").slice(0, 50)}`);
+}
+
+// ---------- tape sharing (.tape files + share-link blobs) ----------
+// Wire format is defined server-side in app/main.py. The frontend just
+// has to encode/decode the JSON blob for URL transport, render preview
+// UI, and POST it back through the import endpoint.
+const TAPE_FORMAT_NAME = "tapestry-tape";
+
+function encodeBlob(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  // URL-safe base64: +/= → -_ (no padding).
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function decodeBlob(s) {
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+  const bin = atob(padded);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+function isTapePayload(p) {
+  return !!(p && typeof p === "object" && p._format === TAPE_FORMAT_NAME);
+}
+
+// Pretty "X tracks · M:SS" line for the preview modals.
+function tapePreviewMeta(tape) {
+  const bits = [];
+  if (tape.date) bits.push(tape.date.replace(/-/g, "·"));
+  const count = tape.track_count || (tape.tracks || []).length;
+  if (count) bits.push(`${count} track${count === 1 ? "" : "s"}`);
+  if (tape.is_mix) {
+    const total = (tape.tracks || []).reduce((a, t) => a + (t.lengthSec || 0), 0);
+    if (total > 0) bits.push(fmtMMSS(total));
+  }
+  return bits.join(" · ").toUpperCase();
+}
+
+let _shareIdentifier = null;
+
+async function openShareModal(identifier) {
+  _shareIdentifier = identifier;
+  const tape = drawerCache.get(identifier);
+  if (!tape) {
+    toast("tape not in drawer", "error");
+    return;
+  }
+  $("#shareTapeTitle").textContent = tape.title || identifier;
+  $("#shareTapeMeta").textContent = `${(tape.creator || "—").toUpperCase()} · ${tapePreviewMeta(tape)}`;
+  $("#shareLink").value = "loading…";
+  $("#shareLinkNote").textContent = "";
+  $("#shareModal").hidden = false;
+  document.body.classList.add("modal-open");
+
+  // Build the URL with cover stripped — keeps grabbed-tape links short
+  // and avoids hundreds of KB of base64 in a URL for mix tapes.
+  try {
+    const payload = await API.exportTape(identifier, { cover: "skip" });
+    const blob = encodeBlob(payload);
+    const link = `${location.origin}${location.pathname}?import=${blob}`;
+    $("#shareLink").value = link;
+    const kb = (link.length / 1024).toFixed(1);
+    if (link.length > 6000) {
+      $("#shareLinkNote").textContent =
+        `link is ${kb} kb — large mixes share better as a .tape file`;
+    } else {
+      $("#shareLinkNote").textContent = `${kb} kb · paste into a friend's tapestry`;
+    }
+  } catch (e) {
+    $("#shareLink").value = "";
+    $("#shareLinkNote").textContent = `couldn't build link · ${e.message}`;
+  }
+}
+
+function closeShareModal() {
+  $("#shareModal").hidden = true;
+  _shareIdentifier = null;
+  if (!state.searchOpen && !state.drawerOpen) document.body.classList.remove("modal-open");
+}
+
+async function copyShareLink() {
+  const link = $("#shareLink").value;
+  if (!link || link === "loading…") return;
+  try {
+    await navigator.clipboard.writeText(link);
+    toast("✓ link copied");
+  } catch {
+    // Fall back to select-all so the user can ⌘C manually.
+    $("#shareLink").select();
+    document.execCommand?.("copy");
+    toast("✓ link selected · ⌘C to copy");
+  }
+}
+
+function downloadShareFile() {
+  if (!_shareIdentifier) return;
+  // mode=file sets Content-Disposition + the .tape extension server-side.
+  // A real anchor click is the most reliable way to trigger a download in
+  // pywebview's WKWebView; window.open won't always honor it.
+  const a = document.createElement("a");
+  a.href = `/api/tape/${encodeURIComponent(_shareIdentifier)}/export?mode=file&cover=embed`;
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => a.remove(), 1000);
+  toast("▤ .tape file downloaded");
+}
+
+let _pendingImport = null;
+
+function showImportPreview(payload) {
+  if (!isTapePayload(payload)) {
+    toast("not a tapestry-tape file", "error");
+    return;
+  }
+  _pendingImport = payload;
+  const tape = payload.tape || {};
+
+  $("#importPreviewTitle").textContent = tape.title || tape.identifier || "Untitled tape";
+  $("#importPreviewCreator").textContent = (tape.creator || "—").toUpperCase();
+  $("#importPreviewMeta").textContent = [
+    tape.is_mix ? "mix tape" : "archive.org tape",
+    tapePreviewMeta(tape),
+  ].filter(Boolean).join(" · ");
+
+  // Cover: embedded data, then external URL, then archive.org service/img.
+  const art = $("#importPreviewArt");
+  let coverUrl = "";
+  if (payload.cover?.data_b64 && payload.cover.mime) {
+    coverUrl = `data:${payload.cover.mime};base64,${payload.cover.data_b64}`;
+  } else if (tape.image_url) {
+    coverUrl = tape.image_url;
+  } else if (!tape.is_mix && tape.identifier) {
+    coverUrl = `https://archive.org/services/img/${encodeURIComponent(tape.identifier)}`;
+  }
+  if (coverUrl) {
+    art.classList.remove("is-empty");
+    art.style.backgroundImage = `url("${coverUrl}")`;
+  } else {
+    art.classList.add("is-empty");
+    art.style.backgroundImage = "";
+  }
+
+  $("#importError").hidden = true;
+  $("#importError").textContent = "";
+  $("#importModal").hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeImportModal() {
+  $("#importModal").hidden = true;
+  _pendingImport = null;
+  if (!state.searchOpen && !state.drawerOpen) document.body.classList.remove("modal-open");
+  // If more .tape files were opened in the background while this modal
+  // was up (e.g. user selected several files), show the next one.
+  setTimeout(pollPendingOpens, 100);
+}
+
+async function confirmImport() {
+  if (!_pendingImport) return;
+  const btn = $("#importConfirm");
+  btn.disabled = true;
+  btn.textContent = "▤ adding…";
+  try {
+    const { tape } = await API.importTape(_pendingImport);
+    drawerCache.set(tape.identifier, tape);
+    refreshDrawerCount();
+    if (state.drawerOpen) await renderDrawer();
+    closeImportModal();  // closeImportModal will poll for any next queued open-file
+    toast(`▤ filed · ${(tape.title || "").slice(0, 50)}`);
+  } catch (e) {
+    $("#importError").hidden = false;
+    $("#importError").textContent = e.message || String(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "▤ Add to drawer";
+  }
+}
+
+async function importTapeFromFile(file) {
+  if (!file) return;
+  if (file.size > 12 * 1024 * 1024) {
+    toast("file too large", "error");
+    return;
+  }
+  try {
+    const text = await file.text();
+    const payload = JSON.parse(text);
+    showImportPreview(payload);
+  } catch (e) {
+    toast(`couldn't read file · ${e.message}`, "error");
+  }
+}
+
+// Poll the server-side queue of .tape files opened via Finder double-
+// click. The desktop entry point's NSApp delegate drops parsed payloads
+// there. We pop one at a time so the import-preview modal handles them
+// sequentially when several .tape files were opened in quick succession.
+async function pollPendingOpens() {
+  // Don't stack import previews on top of each other.
+  if (!$("#importModal").hidden) return;
+  try {
+    const { item } = await api("/api/tape/pending-open");
+    if (item) showImportPreview(item);
+  } catch {}
+}
+
+// On boot: if the URL carries an `?import=<blob>` parameter, decode it
+// and offer to file the tape. Strip the param afterwards so refresh
+// doesn't re-trigger the prompt.
+function handleBootImport() {
+  const params = new URLSearchParams(location.search);
+  const blob = params.get("import");
+  if (!blob) return;
+  try {
+    const payload = decodeBlob(blob);
+    showImportPreview(payload);
+  } catch (e) {
+    toast(`bad share link · ${e.message}`, "error");
+  } finally {
+    params.delete("import");
+    const search = params.toString();
+    history.replaceState(null, "", location.pathname + (search ? `?${search}` : ""));
+  }
 }
 
 // ---------- suggestions ----------
@@ -1649,11 +2080,44 @@ async function doSearch() {
   }
 }
 
+// Expand the server-side "This Mac" entry into one entry per detected
+// macOS audio output (BT speaker, AirPods, HDMI, built-in, USB DAC, ...).
+// Each expanded entry's `id` is the browser's deviceId, which we pass to
+// `audio.setSinkId()` before playback. Falls back to the single "This
+// Mac · Default output" entry when feature detection fails.
+async function expandLocalPlayer(players) {
+  if (!sinkSupport.canRoute) return players;
+  const outputs = await listAudioOutputs();
+  if (!outputs.length) return players;
+  const idx = players.findIndex((p) => p.backend === "local");
+  if (idx < 0) return players;
+  audioOutputs = outputs;
+  // The default-output entry preserves the legacy id `this-device` so a
+  // previously-stored player selection keeps working across upgrades.
+  const expanded = outputs.map((o, i) => {
+    const isDefault = o.deviceId === "default" || o.deviceId === "" || i === 0;
+    const label = o.label || (isDefault ? "Default output" : `Output ${i + 1}`);
+    return {
+      backend: "local",
+      id: isDefault ? "this-device" : o.deviceId,
+      mac: "",
+      name: isDefault ? `This Mac · ${label}` : `This Mac · ${label}`,
+      model: "in-app playback",
+      power: true,
+      connected: true,
+      current_track: "",
+    };
+  });
+  return [...players.slice(0, idx), ...expanded, ...players.slice(idx + 1)];
+}
+
 // ---------- players + now-playing ----------
 async function loadPlayers() {
   const sel = $("#player");
   try {
-    const { players, errors } = await API.players();
+    const resp = await API.players();
+    const { errors } = resp;
+    const players = await expandLocalPlayer(resp.players || []);
     state.playerList = players || [];
     sel.innerHTML = "";
     if (!players.length) {
@@ -2067,7 +2531,52 @@ function init() {
   $("#drawerSort").addEventListener("change", renderDrawer);
   $("#caseBack").addEventListener("click", closeTapeCase);
   $("#caseLoad").addEventListener("click", loadCurrentCaseTape);
+  $("#caseShare").addEventListener("click", () => {
+    if (state.openTapeId) openShareModal(state.openTapeId);
+  });
   $("#caseDiscard").addEventListener("click", discardCurrentCaseTape);
+
+  // Share modal
+  $("#shareClose").addEventListener("click", closeShareModal);
+  $("#shareBackdrop").addEventListener("click", closeShareModal);
+  $("#shareDone").addEventListener("click", closeShareModal);
+  $("#shareCopyLink").addEventListener("click", copyShareLink);
+  $("#shareDownloadFile").addEventListener("click", downloadShareFile);
+
+  // Import preview modal
+  $("#importClose").addEventListener("click", closeImportModal);
+  $("#importBackdrop").addEventListener("click", closeImportModal);
+  $("#importCancel").addEventListener("click", closeImportModal);
+  $("#importConfirm").addEventListener("click", confirmImport);
+
+  // Import-tape entry points: button (file picker), drag-drop onto the
+  // drawer modal panel, and the ?import=<blob> URL parameter handled below.
+  $("#importTapeBtn").addEventListener("click", () => $("#importTapeFile").click());
+  $("#importTapeFile").addEventListener("change", (e) => {
+    const f = e.target.files?.[0];
+    if (f) importTapeFromFile(f);
+    e.target.value = "";  // allow re-selecting the same file
+  });
+  const drawerPanel = $("#drawerModal .modal__panel");
+  if (drawerPanel) {
+    ["dragenter", "dragover"].forEach((ev) =>
+      drawerPanel.addEventListener(ev, (e) => {
+        if (Array.from(e.dataTransfer?.types || []).includes("Files")) {
+          e.preventDefault();
+          drawerPanel.classList.add("is-drop-target");
+        }
+      }),
+    );
+    ["dragleave", "dragend", "drop"].forEach((ev) =>
+      drawerPanel.addEventListener(ev, () => drawerPanel.classList.remove("is-drop-target")),
+    );
+    drawerPanel.addEventListener("drop", (e) => {
+      const f = e.dataTransfer?.files?.[0];
+      if (!f) return;
+      e.preventDefault();
+      importTapeFromFile(f);
+    });
+  }
 
   // ▤ Grab button on the cassette insert (deck) — saves loaded tape to drawer.
   $("#insertGrab").addEventListener("click", grabCurrentTape);
@@ -2179,6 +2688,86 @@ function init() {
       btn.textContent = orig;
     }
   });
+
+  // Audio output routing (per-output picker for "This Mac")
+  const outputsNote = $("#settingsOutputsNote");
+  if (!sinkSupport.canRoute) {
+    if (outputsNote) outputsNote.textContent =
+      "this build of webkit doesn't expose per-output routing · the local backend uses the system default";
+    $("#revealOutputs").disabled = true;
+    $("#refreshOutputs").disabled = true;
+  }
+  $("#revealOutputs").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "↻ asking…";
+    try {
+      await unlockOutputLabels();
+      await loadPlayers();
+      toast("✓ output names revealed");
+    } catch (err) {
+      toast(`couldn't reveal · ${err.message}`, "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+  $("#refreshOutputs").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "↻ refreshing…";
+    try {
+      await loadPlayers();
+      toast(`↻ outputs refreshed · ${audioOutputs.length} found`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+  // React to OS-level output changes (BT speaker connects/disconnects, etc.).
+  if (navigator.mediaDevices?.addEventListener) {
+    navigator.mediaDevices.addEventListener("devicechange", () => loadPlayers());
+  }
+
+  // Updates
+  $("#settingsAutoUpdate").addEventListener("change", async (e) => {
+    try {
+      await API.saveSettings({ auto_check_updates: e.target.checked });
+    } catch (err) {
+      toast(`couldn't save · ${err.message}`, "error");
+    }
+  });
+  $("#checkUpdatesBtn").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = "↻ checking…";
+    try {
+      await checkForUpdates();
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+  $("#installUpdateBtn").addEventListener("click", installUpdate);
+
+  // App version → colophon + boot-time update check.
+  api("/api/health").then((h) => {
+    appVersion = h.version || "";
+    $("#colophonVersion").textContent = appVersion ? `v${appVersion}` : "";
+    runAutoUpdateCheck();
+  }).catch(() => {});
+
+  // If someone opened a tapestry share link, show the import preview.
+  handleBootImport();
+
+  // .tape files double-clicked in Finder land in the server-side queue;
+  // pull them on boot and whenever we regain focus (covers the "Tapestry
+  // already running, user opens another .tape" case).
+  pollPendingOpens();
+  window.addEventListener("focus", pollPendingOpens);
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
