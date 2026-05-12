@@ -24,20 +24,27 @@ if [[ -z "${VIRTUAL_ENV:-}" ]]; then
 fi
 
 echo "→ cleaning previous build/"
-# Preserve any pre-built icon so we don't have to rebuild it every run.
+# Preserve any pre-built icons (app + .tape doc) so we don't have to
+# regenerate them every run — Pillow rendering takes a few seconds.
 if [[ -f dist/icon.icns ]]; then
   cp dist/icon.icns /tmp/tapestry-icon-keep.icns
+fi
+if [[ -f dist/tape.icns ]]; then
+  cp dist/tape.icns /tmp/tapestry-tape-icon-keep.icns
 fi
 rm -rf build dist
 mkdir -p dist
 if [[ -f /tmp/tapestry-icon-keep.icns ]]; then
   mv /tmp/tapestry-icon-keep.icns dist/icon.icns
 fi
+if [[ -f /tmp/tapestry-tape-icon-keep.icns ]]; then
+  mv /tmp/tapestry-tape-icon-keep.icns dist/tape.icns
+fi
 
-# Build the .icns the first time; subsequent runs reuse it. To regenerate
-# after editing build-icon.py, just delete dist/icon.icns first.
-if [[ ! -f dist/icon.icns ]]; then
-  echo "→ generating app icon"
+# Build the .icns files the first time; subsequent runs reuse them. To
+# regenerate after editing build-icon.py, delete the .icns files first.
+if [[ ! -f dist/icon.icns || ! -f dist/tape.icns ]]; then
+  echo "→ generating app + .tape document icons"
   ./scripts/build-icon.sh
 fi
 
@@ -65,6 +72,41 @@ pyinstaller \
   app/desktop.py
 
 echo "→ built: dist/Tapestry.app"
+
+# Drop the .tape document icon into the bundle and patch Info.plist with
+# a UTI + CFBundleDocumentTypes entry. Effects in Finder:
+#   * .tape files show our cassette-on-paper icon
+#   * macOS knows Tapestry "owns" the .tape type (LSHandlerRank: Owner)
+#   * mime-type application/x-tapestry-tape is recognized for downloads
+cp dist/tape.icns "dist/Tapestry.app/Contents/Resources/tape.icns"
+python - <<'PY'
+import plistlib
+from pathlib import Path
+
+p = Path("dist/Tapestry.app/Contents/Info.plist")
+data = plistlib.loads(p.read_bytes())
+data["CFBundleDocumentTypes"] = [{
+    "CFBundleTypeName": "Tapestry Tape",
+    "CFBundleTypeExtensions": ["tape"],
+    "CFBundleTypeMIMETypes": ["application/x-tapestry-tape"],
+    "CFBundleTypeIconFile": "tape.icns",
+    "CFBundleTypeRole": "Editor",
+    "LSItemContentTypes": ["com.ethros.tapestry.tape"],
+    "LSHandlerRank": "Owner",
+}]
+data["UTExportedTypeDeclarations"] = [{
+    "UTTypeIdentifier": "com.ethros.tapestry.tape",
+    "UTTypeDescription": "Tapestry Tape",
+    "UTTypeConformsTo": ["public.json", "public.data"],
+    "UTTypeIconFile": "tape.icns",
+    "UTTypeTagSpecification": {
+        "public.filename-extension": ["tape"],
+        "public.mime-type": ["application/x-tapestry-tape"],
+    },
+}]
+p.write_bytes(plistlib.dumps(data))
+print("✓ patched Info.plist with .tape UTI + document type")
+PY
 
 # --- code signing (uncomment once you have a Developer ID) ---
 # DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"

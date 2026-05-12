@@ -67,9 +67,13 @@ def get_all() -> dict[str, Any]:
     with _lock:
         data = _load()
         # Always expose the resolved (effective) values, not just stored ones.
+        auto = data.get("auto_check_updates")
         return {
             "lyrion_url": data.get("lyrion_url") or DEFAULT_LYRION_URL,
             "lyrion_url_source": _lyrion_url_source(data),
+            "auto_check_updates": True if auto is None else bool(auto),
+            "last_update_check_at": int(data.get("last_update_check_at") or 0),
+            "last_known_latest": data.get("last_known_latest") or "",
         }
 
 

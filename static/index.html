@@ -193,7 +193,7 @@
   <footer class="colophon">
     <span>tapestry · woven from archive.org</span>
     <span class="dot" aria-hidden="true">·</span>
-    <span>v1.0</span>
+    <span id="colophonVersion">v—</span>
     <span class="dot" aria-hidden="true">·</span>
     <span><a href="https://github.com/Ethros19/tapestry" style="color:inherit;text-decoration:none;">github.com/Ethros19/tapestry</a></span>
   </footer>
@@ -271,6 +271,37 @@
           </div>
           <span class="field__note" id="settingsLyrionSource" style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.6;display:block;margin-top:4px;"></span>
         </label>
+
+        <fieldset class="field" style="display:block;margin:18px 0 14px;border:1px solid var(--rule);padding:12px 14px 14px;">
+          <legend class="field__hint" style="padding:0 6px;">UPDATES</legend>
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span id="settingsVersion" style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.10em;color:var(--ink-2);">tapestry · v—</span>
+            <span id="settingsUpdateStatus" style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);"></span>
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;margin-top:10px;cursor:pointer;">
+            <input id="settingsAutoUpdate" type="checkbox" checked>
+            <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.16em;text-transform:uppercase;color:var(--ink-2);">Auto-check for updates</span>
+          </label>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center;">
+            <button id="checkUpdatesBtn" class="btn btn--ghost" type="button">↻ Check now</button>
+            <button id="installUpdateBtn" class="btn btn--solid" type="button" hidden>▸ Download &amp; install</button>
+            <a id="updateReleasePage" href="https://github.com/Ethros19/tapestry/releases/latest" target="_blank" rel="noopener" hidden
+               style="font-family:var(--font-mono);font-size:11px;color:var(--amber);text-decoration:none;border-bottom:1px dotted var(--amber);">Release notes ↗</a>
+          </div>
+        </fieldset>
+
+        <fieldset class="field" style="display:block;margin:0 0 14px;border:1px solid var(--rule);padding:12px 14px 14px;">
+          <legend class="field__hint" style="padding:0 6px;">MAC AUDIO OUTPUT</legend>
+          <span id="settingsOutputsNote" style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);display:block;margin-bottom:8px;line-height:1.5;">
+            this mac's outputs appear in the player dropdown · pair a bluetooth speaker in macos settings to see it here<br>
+            for airplay: airplay to the speaker from macos control center first, then pick it here
+          </span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <button id="revealOutputs" class="btn btn--ghost" type="button">↻ Reveal device names</button>
+            <button id="refreshOutputs" class="btn btn--ghost" type="button">↻ Refresh outputs</button>
+          </div>
+        </fieldset>
+
         <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
           <button class="btn btn--go" type="submit">Save&nbsp;▸</button>
           <button id="rescanPlayers" class="btn btn--ghost" type="button">↻ Rescan players</button>
@@ -372,7 +403,9 @@
       <p class="modal__caption">
         click a tape to load it on the deck · the × discards it
       </p>
-      <div class="drawer__toolbar" style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin:0 0 6px;">
+      <div class="drawer__toolbar" style="display:flex;align-items:center;gap:8px;justify-content:flex-end;margin:0 0 6px;flex-wrap:wrap;">
+        <button id="importTapeBtn" class="btn btn--ghost" type="button" title="Import a .tape file from a friend" style="margin-right:auto;">▤ Import tape</button>
+        <input id="importTapeFile" type="file" accept=".tape,application/json,application/x-tapestry-tape" hidden>
         <span style="font-family:var(--font-mono);font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-3);">Sort</span>
         <select id="drawerSort" style="background:var(--paper);border:1px solid var(--rule);color:var(--ink);font-family:var(--font-mono);font-size:11px;padding:4px 8px;border-radius:1px;">
           <option value="saved-desc">Saved · newest</option>
@@ -399,6 +432,7 @@
             <button id="caseBack" class="btn btn--ghost" type="button">← Back to drawer</button>
             <div class="drawer__case-actions">
               <button id="caseLoad" class="btn btn--solid" type="button">▸ Load whole tape</button>
+              <button id="caseShare" class="btn btn--ghost" type="button" title="Send this tape to a friend">▤ Share</button>
               <button id="caseDiscard" class="btn btn--ghost" type="button">× Discard tape</button>
             </div>
           </div>
@@ -419,6 +453,70 @@
             </div>
           </div>
           <div id="caseTracks"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== SHARE TAPE MODAL ============== -->
+  <div class="modal" id="shareModal" hidden role="dialog" aria-modal="true" aria-labelledby="shareModalTitle">
+    <div class="modal__backdrop" id="shareBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel" style="width:min(600px,100%);">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ TAPE · SHARE ]</span>
+          <h2 id="shareModalTitle">Send this tape</h2>
+        </div>
+        <button id="shareClose" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+      <div style="padding:0 0 8px;">
+        <p style="font-family:var(--font-mono);font-size:11px;letter-spacing:0.06em;color:var(--ink-2);margin:0 0 16px;line-height:1.6;">
+          <span id="shareTapeTitle" style="color:var(--amber);"></span><br>
+          <span id="shareTapeMeta" style="opacity:0.7;font-size:10px;letter-spacing:0.14em;text-transform:uppercase;"></span>
+        </p>
+
+        <label class="field" style="display:block;margin-bottom:14px;">
+          <span class="field__hint">SHARE LINK</span>
+          <div style="display:flex;gap:8px;align-items:stretch;">
+            <input id="shareLink" type="text" readonly spellcheck="false" style="flex:1;font-size:11px;">
+            <button id="shareCopyLink" class="btn btn--ghost" type="button">▤ Copy</button>
+          </div>
+          <span id="shareLinkNote" class="field__note" style="font-size:10px;letter-spacing:0.12em;text-transform:uppercase;opacity:0.6;display:block;margin-top:4px;"></span>
+        </label>
+
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;flex-wrap:wrap;">
+          <span style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);">or</span>
+          <button id="shareDownloadFile" class="btn btn--solid" type="button">▤ Download .tape file</button>
+          <button id="shareDone" class="btn btn--ghost" type="button">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============== IMPORT TAPE PREVIEW MODAL ============== -->
+  <div class="modal" id="importModal" hidden role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+    <div class="modal__backdrop" id="importBackdrop" aria-hidden="true"></div>
+    <div class="modal__panel" style="width:min(560px,100%);">
+      <header class="modal__head">
+        <div class="modal__heading">
+          <span class="modal__stamp">[ TAPE · IMPORT ]</span>
+          <h2 id="importModalTitle">Add this tape to your drawer?</h2>
+        </div>
+        <button id="importClose" class="modal__close" aria-label="close" type="button">×</button>
+      </header>
+      <div style="padding:0 0 4px;">
+        <div id="importPreview" style="display:flex;gap:16px;align-items:center;margin-bottom:18px;">
+          <div id="importPreviewArt" class="drawer__case-art is-empty" style="width:96px;height:96px;flex-shrink:0;"></div>
+          <div style="flex:1;min-width:0;">
+            <div id="importPreviewTitle" style="font-family:var(--font-mono);font-size:14px;color:var(--amber);margin-bottom:6px;"></div>
+            <div id="importPreviewCreator" style="font-family:var(--font-mono);font-size:11px;color:var(--ink-2);margin-bottom:4px;"></div>
+            <div id="importPreviewMeta" style="font-family:var(--font-mono);font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:var(--ink-3);"></div>
+          </div>
+        </div>
+        <div id="importError" style="font-family:var(--font-mono);font-size:11px;color:#c84a3a;margin-bottom:12px;" hidden></div>
+        <div style="display:flex;gap:10px;justify-content:flex-end;align-items:center;">
+          <button id="importCancel" class="btn btn--ghost" type="button">Cancel</button>
+          <button id="importConfirm" class="btn btn--go" type="button">▤ Add to drawer</button>
         </div>
       </div>
     </div>

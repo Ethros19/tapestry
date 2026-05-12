@@ -264,6 +264,21 @@ kbd {
 }
 .btn--drawer .btn--search__icon { font-size: 14px; }
 
+.btn--gear { padding: 8px 12px; }
+.btn--gear .btn--search__icon {
+  font-size: 22px;
+  line-height: 1;
+  display: inline-block;
+  transform: translateY(-1px);
+}
+
+/* Visible drop target when dragging a .tape file over the drawer modal. */
+.modal__panel.is-drop-target {
+  outline: 2px dashed var(--amber);
+  outline-offset: -8px;
+  background: rgba(224, 147, 64, 0.04);
+}
+
 .topbar__rule {
   height: 0;
   border-top: 1px solid var(--rule);
