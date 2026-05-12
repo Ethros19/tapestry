@@ -2,6 +2,25 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.2.0] — 2026-05-12
+
+### Added
+- **Tape sharing** — new `.tape` file format (JSON, `application/x-tapestry-tape`). Cassette case view exposes a copy-paste share link (cover stripped to keep URLs short) and a `.tape` file download. Imports work via drawer-toolbar button, drag-drop onto the drawer modal, or `?import=<blob>` URL parameter — all funneled through a preview modal before filing. Mix-tape IDs are reminted on import (with `imported_from` breadcrumb); grabbed tapes keep their archive.org identifier. Custom document icon (cassette on a folded paper page) and a Cocoa `application:openFile:` delegate so Finder double-clicks on `.tape` files open in Tapestry.
+- **In-app updates** — GitHub-releases poller in `app/updater.py` with loose-semver compare, DMG download, and a detached installer that mounts the disk image, ditto-swaps the `.app`, strips quarantine, and relaunches. Settings → Updates fieldset has a version line, auto-check toggle (default on, throttled to 6 h), manual "Check now", and a "Download & install" button (only enabled when the bundle is writable). Falls back to opening the release page in dev mode.
+- **Per-output audio routing** (local "This Mac" backend) — frontend feature-detects `HTMLMediaElement.setSinkId` and expands the local entry into one entry per macOS audio output (built-in, BT speakers, AirPods, HDMI, USB DAC). "Reveal device names" requests transient mic permission so `enumerateDevices()` returns labels; "Refresh outputs" + a `devicechange` listener pick up newly paired devices. Settings hint covers the AirPlay route (Control Center first).
+- **Docker support** — `Dockerfile` + `compose.yml` for running Tapestry headless (Linux / server use; the macOS desktop bundle remains the primary distribution).
+
+### Changed
+- Version is now sourced from `updater.__version__` everywhere — FastAPI title, User-Agent, colophon, settings panel — so it can't drift.
+- Bigger gear icon in the deck chrome (22px, was 18).
+- `webview.settings['ALLOW_DOWNLOADS'] = True` in `desktop.py` so the WKWebView native save panel handles `.tape` downloads (~/Downloads); previously they were silently swallowed.
+
+### Fixed
+- Local-backend "armed but never played" vs "user pressed play, then paused" now distinguished via `localCtx.started` — the deck no longer reads as paused on a fresh load, and PLAY+PAUSE piano-key behavior is preserved after a real pause. Status returns `mode=stop` for ended queues so a naturally-finished tape doesn't read as paused.
+
+### Security
+- `/api/updates/install` no longer trusts `download_url` from the request body. The updater keeps an allow-list populated by the most recent `check_latest()`; install refuses anything that doesn't match, guarded by a `threading.Lock` since both endpoints run on worker threads.
+
 ## [1.1.4] — 2026-05-10
 
 ### Reverted
