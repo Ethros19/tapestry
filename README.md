@@ -112,9 +112,17 @@ open dist/Tapestry.app
 
 ### Sharing the .dmg
 
-The unsigned `.app` triggers macOS Gatekeeper. Recipients need to right-click the app → **Open** → confirm in the dialog (or: System Settings → Privacy & Security → **Open Anyway**) the first time. After that it's trusted forever.
+The build is unsigned (ad-hoc only, via PyInstaller). When the DMG is downloaded from the internet, macOS sets a quarantine attribute on the extracted `Tapestry.app` and Gatekeeper rejects it with **“Tapestry.app” is damaged and can’t be opened.** That message is misleading — the app isn't damaged, the quarantine flag combined with the ad-hoc signature is what trips Gatekeeper.
 
-For a clean handoff, sign + notarize the build:
+Recipients drag `Tapestry.app` to `/Applications` from the DMG, then run **once** in Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Tapestry.app
+```
+
+After that the app launches normally and stays trusted. The in-app updater already strips quarantine on its own (`updater.py`), so future upgrades through Settings → Updates work without any manual step — the friction is only on the initial install from the DMG.
+
+For a fully clean handoff with no terminal step, sign + notarize the build:
 1. Get an Apple Developer ID (`Developer ID Application` cert).
 2. Uncomment the `codesign` / `xcrun notarytool` blocks in **both** `scripts/build-app.sh` and `scripts/build-dmg.sh`, fill in `DEVELOPER_ID` and a `notarytool` keychain profile name.
 3. Re-run the build.
