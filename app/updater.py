@@ -37,6 +37,25 @@ RELEASES_HTML = f"https://github.com/{GITHUB_REPO}/releases/latest"
 # clients ping at once. The settings file holds the last check time.
 AUTO_CHECK_INTERVAL_SECONDS = 6 * 60 * 60  # 6 hours
 
+# Allow-list of download URLs vetted by a recent `check_latest()`. The
+# install endpoint refuses anything not in here — a localhost-only API
+# is still attackable by any in-page script that can POST, so we treat
+# `download_url` as untrusted user input even though only our own UI
+# normally sets it.
+_known_url_lock = threading.Lock()
+_known_download_url: str | None = None
+
+
+def _record_download_url(url: str | None) -> None:
+    global _known_download_url
+    with _known_url_lock:
+        _known_download_url = url or None
+
+
+def _is_known_download_url(url: str) -> bool:
+    with _known_url_lock:
+        return bool(_known_download_url) and url == _known_download_url
+
 
 # ---------- version compare ----------
 
@@ -157,6 +176,9 @@ def check_latest(client: httpx.Client | None = None) -> dict[str, Any]:
         "last_update_check_at": result["checked_at"],
         "last_known_latest": result["latest"],
     })
+    # Cache the asset URL so `install_update()` can verify any later
+    # POSTed download_url came from this same check, not an attacker.
+    _record_download_url(result.get("download_url"))
     return result
 
 
@@ -245,6 +267,14 @@ def install_update(download_url: str, on_done: callable = None) -> dict[str, Any
     """
     if not download_url:
         raise RuntimeError("no DMG asset on the latest release")
+    # The URL must match the one we just vended from `check_latest()`.
+    # Without this, anything that can POST to localhost (in-page script,
+    # future XSS via untrusted text) could swap in its own malicious DMG.
+    if not _is_known_download_url(download_url):
+        raise RuntimeError(
+            "download_url doesn't match the latest release check — "
+            "open Settings and Check for updates again",
+        )
     bundle = _bundle_app_path()
     if not bundle:
         raise RuntimeError("self-install only works inside a packaged Tapestry.app")

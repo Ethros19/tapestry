@@ -2092,16 +2092,22 @@ async function expandLocalPlayer(players) {
   const idx = players.findIndex((p) => p.backend === "local");
   if (idx < 0) return players;
   audioOutputs = outputs;
-  // The default-output entry preserves the legacy id `this-device` so a
-  // previously-stored player selection keeps working across upgrades.
+
+  // Browsers expose the system default with deviceId === "default" (or
+  // "" on some implementations). We map that to the legacy "this-device"
+  // id so player selections stored before this feature still resolve;
+  // every other output keeps its deviceId, which we hand to setSinkId.
+  // If no entry self-identifies as default we don't synthesize one — the
+  // user picks an explicit output and "Default output" simply doesn't
+  // appear.
   const expanded = outputs.map((o, i) => {
-    const isDefault = o.deviceId === "default" || o.deviceId === "" || i === 0;
+    const isDefault = o.deviceId === "default" || o.deviceId === "";
     const label = o.label || (isDefault ? "Default output" : `Output ${i + 1}`);
     return {
       backend: "local",
       id: isDefault ? "this-device" : o.deviceId,
       mac: "",
-      name: isDefault ? `This Mac · ${label}` : `This Mac · ${label}`,
+      name: `This Mac · ${label}`,
       model: "in-app playback",
       power: true,
       connected: true,

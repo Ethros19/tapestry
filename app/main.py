@@ -40,6 +40,16 @@ _COVER_EXT_BY_MIME = {v: k for k, v in _COVER_MIME_BY_EXT.items() if k != ".jpeg
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _drawer_lock = Lock()
 
+# Mix-tape cover storage. Hoisted to the top so the tape export/import
+# functions farther down can reference these directly — Python would
+# resolve them at call time either way, but having a constant referenced
+# before its definition is the kind of foot-gun that bites during
+# refactors.
+_COVERS_DIR = settings.data_dir() / "mix-covers"
+_COVERS_DIR.mkdir(parents=True, exist_ok=True)
+_COVER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+_COVER_MAX_BYTES = 6 * 1024 * 1024  # 6 MB
+
 # Cross-thread queue for .tape files opened via Finder double-click. The
 # desktop entry point's Cocoa delegate appends here; the frontend drains
 # via `/api/tape/pending-open` on boot + on window focus. Drained items
@@ -797,12 +807,8 @@ async def tape_import(body: ImportTapeBody):
 
 
 # ---------- mix tape covers ----------
-
-_COVERS_DIR = settings.data_dir() / "mix-covers"
-_COVERS_DIR.mkdir(parents=True, exist_ok=True)
-_COVER_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-_COVER_MAX_BYTES = 6 * 1024 * 1024  # 6 MB
-
+# Constants live at the top of the file; this section just hosts the
+# upload endpoint and the /covers static mount.
 
 @app.post("/api/mix-cover")
 async def upload_cover(file: UploadFile = File(...)):
