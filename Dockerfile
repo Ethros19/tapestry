@@ -15,6 +15,6 @@ RUN git clone --depth=1 https://github.com/Ethros19/tapestry.git . \
 ENV TAPESTRY_DATA_DIR=/data
 VOLUME ["/data"]
 
-EXPOSE 8085
+EXPOSE 8080
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
