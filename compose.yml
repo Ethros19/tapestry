@@ -1,8 +1,6 @@
 services:
   tapestry:
     build: .
-    ports:
-      - "8080:8080"
     volumes:
       - tapestry-data:/data
     environment:
@@ -11,7 +9,9 @@ services:
       TAPESTRY_DATA_DIR: /data
     restart: unless-stopped
     # Needed for mDNS/Zeroconf LMS discovery across the LAN.
-    # Remove if you set LYRION_URL explicitly and don't need auto-discovery.
+    # The app listens on port 8080 directly on the host.
+    # If you don't need auto-discovery, remove `network_mode: host`
+    # and add `ports: ["8080:8080"]` instead.
     network_mode: host
 
 volumes:
