@@ -25,7 +25,7 @@ import httpx
 from . import settings
 
 # Authoritative version — also surfaced to FastAPI / the User-Agent header.
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 # The repo to poll. Keep in sync with the source-of-truth GitHub repo
 # (README + AI-HANDOFF both point at Ethros19/tapestry).
