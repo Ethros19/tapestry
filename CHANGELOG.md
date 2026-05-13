@@ -2,6 +2,17 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.2.2] — 2026-05-13
+
+### Added
+- **Persistent "update available" badge** on the ⚙ gear button. The boot toast was the only signal a new version existed, so users in another app or with the window minimized missed it. A small amber dot now pulses on the gear (same `--amber` / `--amber-glow` palette as the REC light, reusing the `rec-pulse` keyframe) and the button's hover tooltip flips to "Settings · update available". Survives the 6-hour auto-check throttle: if the throttled response indicates a known-newer cached version, the frontend silently re-checks so the badge always has full install metadata behind it.
+
+### Changed
+- **Friendlier archive.org outage message.** When archive.org returns a 5xx or the network drops mid-request, search and tape-load now surface `"The Internet Archive is temporarily unavailable. Try again in a few minutes."` instead of leaking the raw `httpx` exception text and the MDN status-code link to the toast. Real bugs still surface their underlying error so they stay diagnosable. Server-side log captures the actual httpx subclass + status so an outage report can be triaged without reproducing the network state.
+
+### Fixed
+- Client-side version comparator now matches the backend's `_ver_tuple` regex behaviour, so prerelease tags don't disagree between the badge logic and the install-decision logic.
+
 ## [1.2.1] — 2026-05-12
 
 ### Added
