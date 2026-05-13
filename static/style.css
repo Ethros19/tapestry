@@ -888,23 +888,32 @@ kbd {
   pointer-events: none;
 }
 
-/* The dark window cutout in the middle of the orange band.
-   Wider than tall — the reels are larger than the window's height so
-   their top/bottom arcs are clipped (overflow:hidden). */
+/* The clear plastic window cutout in the middle of the orange band.
+   Album art shows through (set as --album-art on .rack — cascades here)
+   behind a slight dark veil for contrast. Wider than tall — the tape
+   pancakes are larger than the window's height so their top/bottom arcs
+   are clipped (overflow:hidden). */
 .cassette__window {
   position: absolute;
   top: 5px; bottom: 5px;
   left: 32px; right: 36px;
   background:
-    radial-gradient(ellipse 80% 70% at center 50%, #100c08 0%, #060403 60%, #020201 100%);
+    linear-gradient(180deg, rgba(0, 0, 0, 0.12) 0%, rgba(0, 0, 0, 0.22) 100%),
+    var(--album-art, radial-gradient(ellipse 80% 70% at center 50%, #100c08 0%, #060403 60%, #020201 100%));
+  background-size: cover, cover;
+  background-position: center, center;
   border-radius: 1px;
   border: 1px solid rgba(0, 0, 0, 0.85);
   box-shadow:
-    inset 0 3px 8px rgba(0, 0, 0, 0.95),
+    inset 0 2px 5px rgba(0, 0, 0, 0.55),
     inset 0 -1px 0 rgba(255, 220, 180, 0.04);
   overflow: hidden;
   z-index: 1;
 }
+/* Tape pancake — colored ring of wound tape around the spindle. Diameter
+   scales with --hub-supply / --hub-takeup so the amount of tape on each
+   reel is immediately readable: full pancake = lots of tape, thin ring
+   around the spindle = nearly empty. */
 .cassette__hub {
   position: absolute;
   top: 50%;
@@ -914,15 +923,21 @@ kbd {
   margin-left: calc(var(--hub-supply, 88px) / -2);
   border-radius: 50%;
   background:
+    /* faint concentric tape-wind rings */
+    repeating-radial-gradient(circle,
+      rgba(0,0,0,0.10) 0px,
+      rgba(0,0,0,0.10) 1px,
+      transparent 1px,
+      transparent 3px),
     radial-gradient(circle,
-      #050402 0% 16%,
-      #1a1410 16% 28%,
-      #2a2118 28% 100%);
-  border: 1px solid #3a3024;
+      var(--tape-band-hi, #e0883a) 0%,
+      var(--tape-band, #d97e2d) 55%,
+      var(--tape-band-2, #b56218) 100%);
+  border: 1px solid rgba(0,0,0,0.55);
   box-shadow:
-    inset 0 0 0 1px rgba(0,0,0,0.55),
-    inset 0 -4px 8px rgba(0,0,0,0.7),
-    0 0 6px rgba(0,0,0,0.6);
+    inset 0 0 0 1px rgba(0,0,0,0.25),
+    inset 0 -3px 6px rgba(0,0,0,0.35),
+    0 0 6px rgba(0,0,0,0.55);
   z-index: 1;
   transition:
     width 0.5s ease,
@@ -938,40 +953,40 @@ kbd {
   margin-top:  calc(var(--hub-takeup, 24px) / -2);
   margin-left: calc(var(--hub-takeup, 24px) / -2);
 }
+/* Spindle — fixed-size dark hub at the center of the tape pancake. Stays
+   the same size on both reels regardless of how much tape is wound, so
+   the colored tape ring around it directly visualizes remaining tape. */
 .cassette__hub-teeth {
   position: absolute;
-  inset: 0;
+  top: 50%; left: 50%;
+  width: 20px; height: 20px;
+  margin: -10px 0 0 -10px;
   border-radius: 50%;
+  background:
+    radial-gradient(circle, #261d14 0%, #14100b 65%, #050402 100%);
+  border: 1px solid rgba(0,0,0,0.9);
+  box-shadow:
+    inset 0 0 0 1px rgba(80, 65, 45, 0.5),
+    inset 0 -1px 2px rgba(0,0,0,0.7),
+    0 0 0 1px rgba(0,0,0,0.5);
+  z-index: 2;
 }
-/* spokes inside the hub — percentage-based so they scale with hub size */
+/* spokes through the spindle */
 .cassette__hub-teeth::before,
 .cassette__hub-teeth::after {
   content: '';
   position: absolute;
-  background: rgba(180, 150, 110, 0.5);
-  inset: 50% 22%;
-  height: 1px;
-  margin-top: -0.5px;
+  background: rgba(220, 200, 160, 0.75);
+}
+.cassette__hub-teeth::before {
+  top: 50%; left: 18%; right: 18%;
+  height: 1.2px;
+  margin-top: -0.6px;
 }
 .cassette__hub-teeth::after {
-  inset: 22% 50%;
-  width: 1px; height: auto;
-  margin: 0;
-  margin-left: -0.5px;
-}
-/* gear-tooth detail just inside the hub edge */
-.cassette__hub::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background:
-    repeating-conic-gradient(
-      rgba(180, 150, 110, 0.3) 0deg 5deg,
-      transparent 5deg 10deg);
-  -webkit-mask: radial-gradient(circle, transparent 0 70%, #000 70% 88%, transparent 88%);
-          mask: radial-gradient(circle, transparent 0 70%, #000 70% 88%, transparent 88%);
-  pointer-events: none;
+  top: 18%; bottom: 18%; left: 50%;
+  width: 1.2px;
+  margin-left: -0.6px;
 }
 .cassette.is-playing .cassette__hub {
   animation: hub-spin 1.6s linear infinite;
@@ -986,11 +1001,12 @@ kbd {
   right: 26%;
   height: 1.5px;
   transform: translateY(-50%);
+  /* Use the tape band color so the running strip matches the wound pancakes. */
   background: linear-gradient(90deg,
-    rgba(80, 60, 35, 0.7) 0%,
-    rgba(180, 140, 90, 0.85) 50%,
-    rgba(80, 60, 35, 0.7) 100%);
-  box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+    var(--tape-band-2, #b56218) 0%,
+    var(--tape-band-hi, #e0883a) 50%,
+    var(--tape-band-2, #b56218) 100%);
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.7);
   z-index: 0;
   margin: 0;
 }
@@ -1078,6 +1094,31 @@ kbd {
 .insert__grab:hover {
   background: rgba(255, 240, 200, 0.7) !important;
   border-color: rgba(80, 55, 30, 0.8) !important;
+}
+
+/* Album thumbnail — taped-on photo in the top-right of the insert. Hidden
+   when the loaded tape has no image_url. */
+.insert__cover {
+  position: absolute;
+  top: 52px;
+  right: 24px;
+  width: 92px;
+  height: 92px;
+  object-fit: cover;
+  border-radius: 2px;
+  border: 4px solid #f7eed8;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.15),
+    0 8px 16px -6px rgba(0, 0, 0, 0.5),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  transform: rotate(2.2deg);
+  pointer-events: none;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.05);
+}
+.insert__paper.has-cover .insert__title,
+.insert__paper.has-cover .insert__creator {
+  padding-right: 116px;
 }
 
 .insert__title {
