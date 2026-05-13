@@ -663,6 +663,20 @@ function showInsertFor(item, currentUrl) {
   $("#insertCreator").textContent = item.creator || "—";
   $("#insertId").textContent = item.identifier || "—";
 
+  const cover = $("#insertCover");
+  const paper = document.querySelector(".insert__paper");
+  if (cover) {
+    if (item.image_url) {
+      cover.src = item.image_url;
+      cover.hidden = false;
+      paper?.classList.add("has-cover");
+    } else {
+      cover.removeAttribute("src");
+      cover.hidden = true;
+      paper?.classList.remove("has-cover");
+    }
+  }
+
   const ol = $("#insertTracks");
   ol.innerHTML = "";
   (item.tracks || []).forEach((t, i) => {
@@ -699,6 +713,12 @@ function hideInsert() {
   $("#welcome").hidden = false;
   const rack = document.querySelector(".rack");
   if (rack) rack.style.removeProperty("--album-art");
+  const cover = $("#insertCover");
+  if (cover) {
+    cover.removeAttribute("src");
+    cover.hidden = true;
+  }
+  document.querySelector(".insert__paper")?.classList.remove("has-cover");
   clearDeckStyle();
 }
 
