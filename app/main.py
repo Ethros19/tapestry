@@ -133,6 +133,27 @@ class SeekBody(BaseModel):
 # backends land.
 _lyrion = players.get("lyrion")
 
+# archive.org has frequent multi-hour outages (DDoS, infra incidents).
+# When the upstream is down we surface a single actionable message
+# instead of leaking raw httpx errors to the toast.
+ARCHIVE_UNAVAILABLE_MSG = (
+    "The Internet Archive is temporarily unavailable. Try again in a few minutes."
+)
+
+
+def _archive_http_error(e: httpx.HTTPError) -> HTTPException:
+    """Map an archive.org failure to a user-friendly HTTPException.
+
+    Upstream 5xx responses and connection-level errors collapse to 503
+    with one consistent message; other httpx errors keep their raw text
+    behind a 502 so genuine bugs stay diagnosable.
+    """
+    if isinstance(e, httpx.HTTPStatusError) and 500 <= e.response.status_code < 600:
+        return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
+    if isinstance(e, (httpx.ConnectError, httpx.TimeoutException)):
+        return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
+    return HTTPException(status_code=502, detail=f"archive.org error: {e}")
+
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
@@ -252,7 +273,7 @@ async def search(
             rows=rows, start=start,
         )
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
     return {"results": results, "count": len(results)}
 
 
@@ -284,9 +305,9 @@ async def item(identifier: str):
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise HTTPException(status_code=404, detail="item not found")
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
 
 
 @app.get("/api/players")
