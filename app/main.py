@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
@@ -133,6 +134,28 @@ class SeekBody(BaseModel):
 # backends land.
 _lyrion = players.get("lyrion")
 
+log = logging.getLogger(__name__)
+
+# archive.org has frequent multi-hour outages. Surface one actionable
+# message instead of leaking raw httpx errors to the toast.
+ARCHIVE_UNAVAILABLE_MSG = (
+    "The Internet Archive is temporarily unavailable. Try again in a few minutes."
+)
+
+
+def _archive_http_error(e: httpx.HTTPError) -> HTTPException:
+    # Upstream 5xx and any transport/timeout failure collapse to 503; other
+    # httpx errors keep raw text behind 502 so genuine bugs stay diagnosable.
+    # Server-side log captures the actual subclass + status so an "archive is
+    # down" report can be triaged without reproducing the network state.
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    log.warning("archive.org request failed: %s status=%s", type(e).__name__, status)
+    if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
+        return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
+    if isinstance(e, (httpx.TransportError, httpx.TimeoutException)):
+        return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
+    return HTTPException(status_code=502, detail=f"archive.org error: {e}")
+
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
@@ -252,7 +275,7 @@ async def search(
             rows=rows, start=start,
         )
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
     return {"results": results, "count": len(results)}
 
 
@@ -284,9 +307,9 @@ async def item(identifier: str):
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             raise HTTPException(status_code=404, detail="item not found")
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"archive.org error: {e}")
+        raise _archive_http_error(e)
 
 
 @app.get("/api/players")
