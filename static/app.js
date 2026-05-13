@@ -1112,11 +1112,10 @@ async function checkForUpdates({ silent = false } = {}) {
   }
 }
 
-// Loose semver compare: 'v1.10.0-beta' vs '1.9.5' → 1. Mirrors the
-// backend's updater._parse_version so client + server agree.
+// Mirrors the backend's updater._ver_tuple so the throttle-skip path
+// here and is_newer() on the server agree on which tag is newer.
 function compareVersions(a, b) {
-  const parse = (v) => String(v || "").replace(/^v/i, "").split("-")[0]
-    .split(".").map((n) => parseInt(n, 10) || 0);
+  const parse = (v) => (String(v || "").match(/\d+/g) || []).map(Number);
   const av = parse(a), bv = parse(b);
   const len = Math.max(av.length, bv.length);
   for (let i = 0; i < len; i++) {
@@ -1144,7 +1143,16 @@ async function runAutoUpdateCheck() {
     // pending, run an explicit re-check so we have full install info
     // (download_url, html_url, can_install) to drive the badge → CTA.
     if (info.skipped && info.latest && compareVersions(info.latest, info.current) > 0) {
-      try { info = await API.checkUpdates(); } catch { info = null; }
+      try {
+        info = await API.checkUpdates();
+      } catch {
+        // Re-check failed; keep the skipped payload so the badge still
+        // shows. We know an update is pending — we just don't have the
+        // install URL handy. Settings re-fetches when opened.
+        lastUpdateInfo = info;
+        setGearUpdateBadge(true);
+        return;
+      }
     }
     if (!info || info.skipped) {
       lastUpdateInfo = null;
@@ -1157,8 +1165,10 @@ async function runAutoUpdateCheck() {
       const verb = info.can_install ? "open settings to install" : "see release notes";
       toast(`▸ update available · v${info.latest} · ${verb}`);
     }
-  } catch {
-    // Silent — boot-time check failures shouldn't bother the user.
+  } catch (e) {
+    // Silent at the UI layer — boot-time check failures shouldn't
+    // toast. Log to console so devtools triage still works.
+    console.warn("auto-update check failed:", e);
   }
 }
 

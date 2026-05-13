@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
@@ -133,24 +134,25 @@ class SeekBody(BaseModel):
 # backends land.
 _lyrion = players.get("lyrion")
 
-# archive.org has frequent multi-hour outages (DDoS, infra incidents).
-# When the upstream is down we surface a single actionable message
-# instead of leaking raw httpx errors to the toast.
+log = logging.getLogger(__name__)
+
+# archive.org has frequent multi-hour outages. Surface one actionable
+# message instead of leaking raw httpx errors to the toast.
 ARCHIVE_UNAVAILABLE_MSG = (
     "The Internet Archive is temporarily unavailable. Try again in a few minutes."
 )
 
 
 def _archive_http_error(e: httpx.HTTPError) -> HTTPException:
-    """Map an archive.org failure to a user-friendly HTTPException.
-
-    Upstream 5xx responses and connection-level errors collapse to 503
-    with one consistent message; other httpx errors keep their raw text
-    behind a 502 so genuine bugs stay diagnosable.
-    """
-    if isinstance(e, httpx.HTTPStatusError) and 500 <= e.response.status_code < 600:
+    # Upstream 5xx and any transport/timeout failure collapse to 503; other
+    # httpx errors keep raw text behind 502 so genuine bugs stay diagnosable.
+    # Server-side log captures the actual subclass + status so an "archive is
+    # down" report can be triaged without reproducing the network state.
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    log.warning("archive.org request failed: %s status=%s", type(e).__name__, status)
+    if isinstance(e, httpx.HTTPStatusError) and status is not None and 500 <= status < 600:
         return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
-    if isinstance(e, (httpx.ConnectError, httpx.TimeoutException)):
+    if isinstance(e, (httpx.TransportError, httpx.TimeoutException)):
         return HTTPException(status_code=503, detail=ARCHIVE_UNAVAILABLE_MSG)
     return HTTPException(status_code=502, detail=f"archive.org error: {e}")
 
