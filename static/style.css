@@ -264,12 +264,26 @@ kbd {
 }
 .btn--drawer .btn--search__icon { font-size: 14px; }
 
-.btn--gear { padding: 8px 12px; }
+.btn--gear { padding: 8px 12px; position: relative; }
 .btn--gear .btn--search__icon {
   font-size: 22px;
   line-height: 1;
   display: inline-block;
   transform: translateY(-1px);
+}
+/* Tiny amber dot signalling an available update. Same palette as the
+   REC light; reuses rec-pulse so the rhythm matches existing UI. */
+.btn--gear__badge {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber-glow), 0 0 0 1px rgba(0, 0, 0, 0.45);
+  animation: rec-pulse 2.4s ease-in-out infinite;
+  pointer-events: none;
 }
 
 /* Visible drop target when dragging a .tape file over the drawer modal. */

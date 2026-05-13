@@ -1102,6 +1102,7 @@ async function checkForUpdates({ silent = false } = {}) {
   try {
     const info = await API.checkUpdates();
     lastUpdateInfo = info;
+    setGearUpdateBadge(!!info.available);
     renderUpdateStatus(info);
     return info;
   } catch (e) {
@@ -1111,16 +1112,47 @@ async function checkForUpdates({ silent = false } = {}) {
   }
 }
 
+// Loose semver compare: 'v1.10.0-beta' vs '1.9.5' → 1. Mirrors the
+// backend's updater._parse_version so client + server agree.
+function compareVersions(a, b) {
+  const parse = (v) => String(v || "").replace(/^v/i, "").split("-")[0]
+    .split(".").map((n) => parseInt(n, 10) || 0);
+  const av = parse(a), bv = parse(b);
+  const len = Math.max(av.length, bv.length);
+  for (let i = 0; i < len; i++) {
+    const diff = (av[i] || 0) - (bv[i] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+function setGearUpdateBadge(available) {
+  const badge = $("#gearUpdateBadge");
+  const btn = $("#openSettings");
+  if (!badge || !btn) return;
+  badge.hidden = !available;
+  btn.title = available ? "Settings · update available" : "Settings";
+}
+
 async function runAutoUpdateCheck() {
   // Fire-and-forget on boot. Server throttles via last_update_check_at,
   // so this is safe to call on every page load.
   try {
-    const info = await API.autoCheckUpdates();
-    if (info.skipped) {
+    let info = await API.autoCheckUpdates();
+    // When the 6h throttle skips the GitHub poll, the server still
+    // returns cached current/latest. If a known-newer version is
+    // pending, run an explicit re-check so we have full install info
+    // (download_url, html_url, can_install) to drive the badge → CTA.
+    if (info.skipped && info.latest && compareVersions(info.latest, info.current) > 0) {
+      try { info = await API.checkUpdates(); } catch { info = null; }
+    }
+    if (!info || info.skipped) {
       lastUpdateInfo = null;
+      setGearUpdateBadge(false);
       return;
     }
     lastUpdateInfo = info;
+    setGearUpdateBadge(!!info.available);
     if (info.available) {
       const verb = info.can_install ? "open settings to install" : "see release notes";
       toast(`▸ update available · v${info.latest} · ${verb}`);
