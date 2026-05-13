@@ -2,6 +2,15 @@
 
 All notable changes to Tapestry. The format follows [Keep a Changelog](https://keepachangelog.com); versions follow loose [SemVer](https://semver.org).
 
+## [1.2.3] — 2026-05-13
+
+### Changed
+- **Deck window now shows the loaded tape's album art.** The dark gradient that filled the cassette window has been swapped for a thin veil (`rgba(0,0,0,0.12)→rgba(0,0,0,0.22)`) over `var(--album-art)` — the artwork that was already loaded as a blurred backdrop on the rack now reads clearly through the "clear plastic" window cutout. Top inset shadow also softened from 0.95 to 0.55 so the upper edge of the window isn't a dark band.
+- **Three-color spool visualization.** Each reel is now layered as album-art background → colored tape pancake (uses the per-tape `--tape-band` / `--tape-band-hi` / `--tape-band-2` palette with faint concentric wound-coil rings) → fixed-size dark spindle gear with cream cross-spokes. The pancake diameter still scales with `--hub-supply` / `--hub-takeup` from `setSpools()`, so the thickness of the colored ring around each spindle is a direct readout of how much tape is on that side: thick on the supply side at start, thin on the takeup side; reversed at the end. The connecting tape strip between the hubs was retinted to match the band palette so the running tape visually connects the two pancakes.
+
+### Added
+- **Album thumbnail on the J-card insert.** A small (92×92) taped-on photo in the top-right corner of the cassette insert, with a cream border, drop shadow, and a 2.2° tilt to match the existing binder-mark aesthetic. Pulls from `item.image_url`; hidden when the loaded tape has no artwork. `.insert__paper.has-cover` reserves right-padding on the title and creator lines so handwritten text doesn't crash into the photo.
+
 ## [1.2.2] — 2026-05-13
 
 ### Added
