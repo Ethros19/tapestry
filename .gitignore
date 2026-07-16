@@ -29,3 +29,10 @@ notes/
 
 # Personal folder — handoff notes, drafts, anything you don't want public
 personal/
+.venv-x86/
+.venv-arm64/
+dist-arm64/
+dist-x86/
+dist-universal/
+build-arm64/
+build-x86/
